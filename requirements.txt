@@ -1,0 +1,21 @@
+# === Download do Diário (Playwright dirige o portal do IOERJ) ===
+playwright>=1.45      # navegador headless; requer: python -m playwright install chromium
+tzdata>=2024.1        # fuso America/Sao_Paulo no Windows (zoneinfo)
+
+# === Extração do Diário (MinerU, pipeline CPU) ===
+mineru[core]>=2.0.0
+
+# Confiança no cofre de certificados do Windows (proxy SEFAZ com inspeção TLS).
+truststore>=0.10
+
+# === RAG (busca por texto + leitura por IA) ===
+anthropic>=0.69.0     # Claude (respostas com citação de data/página)
+PyMuPDF>=1.24         # render de página PDF -> imagem (miniaturas de conferência)
+python-dotenv>=1.0    # lê as chaves do .env
+Flask>=3.0            # servidor web local
+markdown>=3.5         # renderiza a resposta (Markdown -> HTML) no front
+
+# === Gravação no Oracle (job de atos de pessoal -> DOERJ_ATOS_PESSOAL) ===
+oracledb>=2.0         # driver Oracle em modo thin (não precisa do Oracle Client)
+
+# Obs.: a busca usa o SQLite FTS5, que já vem embutido no Python (sem dependência).

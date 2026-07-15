@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<!--
+  ============================================================================
+  RAG_DO_MINERu · Front-end da busca no Diário Oficial do RJ (DOERJ)
+  ----------------------------------------------------------------------------
+  Mesmo layout do RAG_DO, mas a resposta da IA vem do TEXTO limpo extraído
+  pelo MinerU (não das imagens). As miniaturas servem só para conferência.
+
+  Rotas do servidor (src/app.py):
+    GET  /api/dates -> edições disponíveis (seletor de datas)
+    POST /api/ask   -> busca por texto + leitura pela Claude
+    GET  /api/page  -> imagem (PNG) de uma página do PDF (conferência)
+  ============================================================================
+-->
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0a4d9e">
+<title>Diário Oficial do RJ — Busca (MinerU)</title>
+<style>
+  :root {
+    --brand: #006bff; --brand-dark: #0052cc; --strip: #00337a; --accent: #006bff;
+    --bg: #eef1f5; --card: #ffffff; --line: #d9dee6; --txt: #1b2733;
+    --muted: #5a6573; --mark: #fff2ac;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--txt);
+    font: 15px/1.55 system-ui, "Segoe UI", Roboto, Arial, sans-serif; }
+  .gov-strip { background: var(--strip); color: #cfe0f5; font-size: 11.5px;
+    letter-spacing: .4px; padding: 5px 20px; text-transform: uppercase; }
+  header.main { background: linear-gradient(180deg, var(--brand) 0%, var(--brand-dark) 100%);
+    color: #fff; padding: 18px 20px; box-shadow: 0 2px 6px rgba(0,0,0,.12); }
+  header.main .wrap { max-width: 980px; margin: 0 auto; display: flex; align-items: center; gap: 14px; }
+  header.main .logo { height: 64px; width: auto; display: block; flex: none; }
+  header.main .sep { width: 1px; align-self: stretch; background: rgba(255,255,255,.4); margin: 2px 2px; }
+  header.main h1 { margin: 0; font-size: 19px; font-weight: 700; }
+  header.main p { margin: 2px 0 0; font-size: 12.5px; color: #d7e6fb; }
+  main { max-width: 980px; margin: 0 auto; padding: 22px 20px 40px; }
+  .searchbar { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(16,42,77,.06); padding: 16px; margin-top: -28px; }
+  form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #q { flex: 1 1 320px; min-width: 200px; padding: 12px 14px; font-size: 15px;
+    background: #fff; color: var(--txt); border: 1px solid var(--line); border-radius: 9px; outline: none; }
+  #q:focus, select:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(0,107,255,.18); }
+  select, button, label.toggle { padding: 11px 12px; font-size: 14px; border-radius: 9px;
+    border: 1px solid var(--line); background: #fff; color: var(--txt); }
+  button { background: var(--brand); border-color: var(--brand-dark); color: #fff; cursor: pointer;
+    font-weight: 600; padding: 11px 20px; }
+  button:hover { background: var(--brand-dark); }
+  button:disabled { opacity: .55; cursor: default; }
+  label.toggle { cursor: pointer; user-select: none; display: flex; gap: 6px; align-items: center; color: var(--muted); }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 10px 2px 0; }
+  .shortcuts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+  .shortcuts .lbl { color: var(--muted); font-size: 12.5px; }
+  .chip { padding: 7px 14px; font-size: 13.5px; font-weight: 600; border-radius: 999px;
+    border: 1px solid var(--brand); background: #fff; color: var(--brand); cursor: pointer; }
+  .chip:hover { background: var(--brand); color: #fff; }
+  #status { margin: 18px 2px 6px; color: var(--muted); min-height: 20px; }
+  .spinner { display: inline-block; width: 14px; height: 14px; margin-right: 8px;
+    border: 2px solid #c7d4e6; border-top-color: var(--brand); border-radius: 50%;
+    animation: spin .8s linear infinite; vertical-align: -2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #scope { display: none; margin: 4px 2px 14px; font-size: 13px; color: var(--brand); font-weight: 600; }
+  .secTitle { color: var(--brand-dark); font-size: 12px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .6px; margin: 6px 2px 10px; padding-bottom: 6px; border-bottom: 2px solid #e3e8ef; }
+  .answer { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(16,42,77,.06); padding: 18px 22px; margin: 8px 0 26px; }
+  .answer h1, .answer h2, .answer h3 { margin-top: .6em; color: var(--brand-dark); }
+  .answer table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 14px; }
+  .answer th, .answer td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; }
+  .answer th { background: #eef3fa; color: var(--brand-dark); }
+  .answer code { background: #eef1f5; padding: 1px 5px; border-radius: 5px; }
+  .answer a { color: var(--brand); }
+  .sources { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+  .src { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 1px 3px rgba(16,42,77,.06); }
+  .src .meta { padding: 9px 11px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .src .meta b { color: var(--brand); }
+  .src .snip { padding: 9px 11px; font-size: 12px; color: var(--muted); }
+  .src .snip mark { background: var(--mark); color: #4a3b00; padding: 0 2px; border-radius: 3px; }
+  .src a.thumb { display: block; background: #fff; border-bottom: 1px solid var(--line); }
+  .src img { width: 100%; display: block; }
+  .err { color: #b4231a; }
+  .usage { color: var(--muted); font-size: 12px; margin-top: 18px; }
+  footer { color: var(--muted); font-size: 11.5px; text-align: center; padding: 22px 20px 30px; }
+
+  /* Título "Resposta" com os botões de download à direita */
+  .secTitle-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  /* .downloads = barra dos 3 botões (Excel/JSON/PDF); começa escondida */
+  .downloads { display: none; gap: 6px; }
+  .downloads .dlbtn {
+    padding: 6px 12px; font-size: 12.5px; font-weight: 600; border-radius: 8px;
+    border: 1px solid var(--brand); background: #fff; color: var(--brand); cursor: pointer;
+  }
+  .downloads .dlbtn:hover { background: var(--brand); color: #fff; }
+  .downloads .dlbtn:disabled { opacity: .5; cursor: default; }
+
+  /* Tabela dos itens estruturados (10 colunas -> rolagem horizontal se precisar) */
+  .itens-scroll { overflow-x: auto; }
+  table.itens { border-collapse: collapse; width: 100%; font-size: 12.5px; margin-top: 8px; }
+  table.itens th, table.itens td {
+    border: 1px solid var(--line); padding: 5px 7px; text-align: left; vertical-align: top;
+  }
+  table.itens th { background: #eef3fa; color: var(--brand-dark); white-space: nowrap; }
+  table.itens td { max-width: 320px; }
+</style>
+</head>
+<body>
+<div class="gov-strip">Governo do Estado do Rio de Janeiro · SEFAZ-RJ</div>
+
+<header class="main">
+  <div class="wrap">
+    <img class="logo" src="/assets/brasao_white.png"
+         alt="Secretaria de Fazenda · Governo do Estado do Rio de Janeiro"
+         onerror="this.style.display='none'">
+    <span class="sep" aria-hidden="true"></span>
+    <div>
+      <h1>Diário Oficial do RJ — Busca</h1>
+      <p>Texto extraído pelo MinerU + leitura por IA (ferramenta interna)</p>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="searchbar">
+    <form id="f">
+      <input id="q" placeholder="Ex.: editais de licitação publicados" autofocus>
+      <select id="dateSel" title="Edição a consultar"></select>
+      <select id="k" title="Quantas páginas analisar">
+        <option value="2">2 págs</option>
+        <option value="4" selected>4 págs</option>
+        <option value="6">6 págs</option>
+        <option value="8">8 págs</option>
+      </select>
+      <label class="toggle"><input type="checkbox" id="searchOnly"> só páginas</label>
+      <button id="btn" type="submit">Buscar</button>
+    </form>
+
+    <div class="shortcuts">
+      <span class="lbl">Atalhos:</span>
+      <button type="button" class="chip" data-fts="Sefaz"
+        data-q="Liste tudo sobre a Sefaz publicado nesta edição.">Sefaz</button>
+      <button type="button" class="chip" data-fts="exoner*"
+        data-q="Liste os atos de exoneração desta edição, com o nome e o cargo de cada pessoa.">Exonerações</button>
+      <button type="button" class="chip" data-fts="nomea*"
+        data-q="Liste os atos de nomeação desta edição, com o nome e o cargo de cada pessoa.">Nomeações</button>
+      <button type="button" class="chip" data-fts="governador"
+        data-q="Liste os atos do Governador publicados nesta edição, resumindo o objeto de cada ato.">Atos do Governador</button>
+      <button type="button" class="chip" data-fts="Leis"
+        data-q="Liste as leis publicadas nesta edição, resumindo o objeto de cada Lei.">Leis</button>
+      <button type="button" class="chip" data-fts="Decretos"
+        data-q="Liste os decretos publicados nesta edição, resumindo o objeto de cada Decreto.">Decretos</button>
+      <button type="button" class="chip" data-fts="Resoluções OR Resolucao"
+        data-q="Liste as Resoluções publicadas nesta edição, resumindo o objeto de cada Resolução.">Resoluções</button>
+    </div>
+    <div class="hint">Por padrão busca só a <b>edição do dia</b>. Para outra data, use o seletor
+      ou cite a data na pergunta (ex.: "licitações em 28/03").</div>
+  </div>
+
+  <div id="status"></div>
+  <div id="scope"></div>
+  <div id="answerWrap" style="display:none">
+    <!-- Título "Resposta" + barra de download (Excel / JSON / PDF) -->
+    <div class="secTitle secTitle-row">
+      <span>Resposta</span>
+      <span id="downloads" class="downloads">
+        <button type="button" class="dlbtn" data-fmt="xlsx" title="Baixar em Excel">⬇ Excel</button>
+        <button type="button" class="dlbtn" data-fmt="json" title="Baixar em JSON">⬇ JSON</button>
+        <button type="button" class="dlbtn" data-fmt="pdf" title="Baixar em PDF">⬇ PDF</button>
+      </span>
+    </div>
+    <div id="answer" class="answer">
+      <div id="resumo"></div>              <!-- resumo (HTML) ou mensagem de erro -->
+      <div id="itens" class="itens-scroll"></div>  <!-- tabela estruturada dos atos -->
+    </div>
+  </div>
+  <div id="sourcesWrap" style="display:none">
+    <div class="secTitle">Páginas usadas</div>
+    <div id="sources" class="sources"></div>
+  </div>
+  <div id="usage" class="usage"></div>
+</main>
+
+<footer>RAG_DO_MINERu · busca do Diário Oficial (MinerU) · uso interno</footer>
+
+<script>
+const f = document.getElementById('f');
+const q = document.getElementById('q');
+const dateSel = document.getElementById('dateSel');
+const kSel = document.getElementById('k');
+const searchOnly = document.getElementById('searchOnly');
+const btn = document.getElementById('btn');
+const statusEl = document.getElementById('status');
+const scopeEl = document.getElementById('scope');
+const answerWrap = document.getElementById('answerWrap');
+const answerEl = document.getElementById('answer');
+const sourcesWrap = document.getElementById('sourcesWrap');
+const sourcesEl = document.getElementById('sources');
+const usageEl = document.getElementById('usage');
+const resumoEl = document.getElementById('resumo');       // resumo da resposta
+const itensEl = document.getElementById('itens');         // tabela dos itens
+const downloadsEl = document.getElementById('downloads'); // barra de download
+
+// Colunas da tabela estruturada — MESMA ordem/nomes do backend (export.py COLUNAS).
+const COLS = [['tipo','Tipo'],['numero','Número'],['data','Data'],['orgao','Órgão'],
+  ['pessoa','Pessoa'],['cargo','Cargo'],['objeto','Objeto'],['processo','Processo'],
+  ['pagina','Página'],['edicao','Edição']];
+
+// Guarda a última resposta ({question, edicao, resumo, itens}) para os downloads.
+let ultima = null;
+
+function esc(s){ const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+function highlight(s){ return esc(s).replace(/\[([^\]]*)\]/g, '<mark>$1</mark>'); }
+function fmt(iso){ if(!iso) return ''; const [y,m,d] = iso.split('-'); return `${d}/${m}/${y}`; }
+
+/* tabelaItens: monta o HTML da tabela estruturada a partir da lista de itens. */
+function tabelaItens(itens){
+  if(!itens || !itens.length)
+    return '<p style="color:var(--muted);margin:8px 0 0">Sem itens estruturados para esta pergunta.</p>';
+  let h = '<table class="itens"><thead><tr>' + COLS.map(c => `<th>${c[1]}</th>`).join('') + '</tr></thead><tbody>';
+  for(const it of itens){
+    h += '<tr>' + COLS.map(c => `<td>${esc(it[c[0]] || '')}</td>`).join('') + '</tr>';
+  }
+  return h + '</tbody></table>';
+}
+
+/* baixar: pede ao servidor o arquivo (Excel/JSON/PDF) da última resposta e
+   dispara o download no navegador. Manda os dados já exibidos (não chama a IA). */
+async function baixar(fmt){
+  if(!ultima || !(ultima.itens && ultima.itens.length)) return;
+  try {
+    const r = await fetch('/api/export', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ fmt, question: ultima.question, edicao: ultima.edicao,
+                             resumo: ultima.resumo, itens: ultima.itens })
+    });
+    if(!r.ok){ alert('Falha ao gerar o arquivo (' + fmt + ').'); return; }
+    const blob = await r.blob();
+    // nome do arquivo vindo do cabeçalho Content-Disposition
+    const cd = r.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const nome = m ? m[1] : ('doerj.' + fmt);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = nome; document.body.appendChild(a); a.click();
+    a.remove(); URL.revokeObjectURL(url);
+  } catch(err){ alert('Erro no download: ' + err); }
+}
+
+(async () => {
+  try {
+    const r = await fetch('/api/dates');
+    const j = await r.json();
+    let opts = `<option value="latest">Edição do dia${j.latest ? ' (' + fmt(j.latest) + ')' : ''}</option>`;
+    for (const d of (j.dates || [])) opts += `<option value="${d}">${fmt(d)}</option>`;
+    opts += `<option value="all">Todas as edições</option>`;
+    dateSel.innerHTML = opts;
+  } catch (e) {
+    dateSel.innerHTML = '<option value="latest">Edição do dia</option><option value="all">Todas</option>';
+  }
+})();
+
+async function doSearch({ question, fts, full }) {
+  question = (question || '').trim();
+  if (!question) return;
+  const onlySearch = searchOnly.checked;
+
+  btn.disabled = true;
+  answerWrap.style.display = 'none';
+  sourcesWrap.style.display = 'none';
+  scopeEl.style.display = 'none';
+  usageEl.textContent = '';
+  resumoEl.innerHTML = '';
+  itensEl.innerHTML = '';
+  downloadsEl.style.display = 'none';
+  ultima = null;
+  sourcesEl.innerHTML = '';
+  statusEl.innerHTML = '<span class="spinner"></span>' +
+    (onlySearch ? 'Buscando páginas…' : 'Buscando e lendo as páginas…');
+
+  try {
+    const r = await fetch('/api/ask', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ question, fts: fts || null, full: !!full, k: parseInt(kSel.value, 10), date: dateSel.value, search_only: onlySearch })
+    });
+    const data = await r.json();
+    statusEl.textContent = '';
+
+    if (data.scope) {
+      scopeEl.textContent = data.scope.all ? '📅 Todas as edições' : ('📅 Edição de ' + fmt(data.scope.date));
+      scopeEl.style.display = '';
+    }
+
+    if (data.error && !(data.results && data.results.length)) {
+      resumoEl.innerHTML = '<span class="err">' + esc(data.error) + '</span>';
+      answerWrap.style.display = '';
+      btn.disabled = false; return;
+    }
+
+    // Resposta estruturada: resumo (HTML) + tabela de itens; e libera os downloads.
+    const temItens = data.itens && data.itens.length;
+    if (data.resumo_html || temItens) {
+      resumoEl.innerHTML = data.resumo_html || '';
+      itensEl.innerHTML = tabelaItens(data.itens || []);
+      answerWrap.style.display = '';
+      if (temItens) {
+        downloadsEl.style.display = 'flex';                       // mostra Excel/JSON/PDF
+        const ed = (data.scope && !data.scope.all) ? (data.scope.date || '') : '';
+        ultima = { question: data.question || '', edicao: ed,
+                   resumo: data.resumo || '', itens: data.itens || [] };
+      }
+    } else if (data.error) {
+      resumoEl.innerHTML = '<span class="err">' + esc(data.error) + '</span>';
+      answerWrap.style.display = '';
+    }
+
+    if (data.results && data.results.length) {
+      // termos da busca -> marca-texto amarelo em cima do trecho na imagem da página
+      const hl = encodeURIComponent(data.terms || '');
+      sourcesEl.innerHTML = data.results.map(rr => {
+        const thumb = `/api/page?pdf=${encodeURIComponent(rr.pdf)}&page=${rr.page}&dpi=110&hl=${hl}`;
+        const full  = `/api/page?pdf=${encodeURIComponent(rr.pdf)}&page=${rr.page}&dpi=220&hl=${hl}`;
+        return `<div class="src">
+          <div class="meta">Edição <b>${esc(fmt(rr.date))}</b> · página <b>${rr.page}</b>
+            <span style="color:var(--muted)"> · score ${rr.score.toFixed(1)}</span></div>
+          <a class="thumb" href="${full}" target="_blank" rel="noopener">
+            <img loading="lazy" src="${thumb}" alt="página ${rr.page}"></a>
+          <div class="snip">${highlight(rr.snippet)}</div>
+        </div>`;
+      }).join('');
+      sourcesWrap.style.display = '';
+    }
+
+    if (data.usage) {
+      usageEl.textContent = `tokens: entrada ${data.usage.input} · saída ${data.usage.output}`;
+    }
+  } catch (err) {
+    statusEl.innerHTML = '<span class="err">Falha na requisição: ' + esc(String(err)) + '</span>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+f.addEventListener('submit', (e) => { e.preventDefault(); doSearch({ question: q.value }); });
+document.querySelectorAll('.chip[data-q]').forEach((c) => {
+  // full: true -> os atalhos leem TODAS as páginas do tema (não só as top-N),
+  // para trazer a lista completa (ex.: todas as exonerações da edição).
+  c.addEventListener('click', () => doSearch({ question: c.dataset.q, fts: c.dataset.fts, full: true }));
+});
+
+/* Botões de download (Excel / JSON / PDF): cada um baixa no formato do data-fmt. */
+document.querySelectorAll('.dlbtn').forEach((b) => b.addEventListener('click', () => baixar(b.dataset.fmt)));
+</script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+# --- Segredos / configuração local (NUNCA subir) ---
+.env
+
+# --- Ambiente virtual ---
+.venv/
+venv/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- Dados gerados pelo pipeline (não versionar) ---
+# PDFs baixados do D.O.
+downloads/
+# saída do MinerU (markdown + content_list.json + imagens)
+saida/
+# índice FTS5 e jsons gerados
+data/
+# logs de execução
+logs/
+# prints de falha do download
+screenshots/
+
+# --- Arquivos avulsos de teste ---
+_pag3.png
+_payload.json
+teste.txt

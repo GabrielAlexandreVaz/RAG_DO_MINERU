@@ -37,6 +37,16 @@ _LIMITES = {
 _TABELA_RE = re.compile(r"^[A-Za-z0-9_$.]+$")
 
 
+def configurado():
+    """True se as credenciais do Oracle estão preenchidas no .env.
+
+    Permite ao job PULAR a gravação (com aviso) em vez de derrubar o pipeline
+    inteiro quando o banco ainda não foi configurado."""
+    s = config.oracle_settings()
+    return bool(s["user"] and s["password"] and s["dsn"]
+                and s["dsn"] != "host:1521/SERVICE_NAME")   # o placeholder do .env.example
+
+
 def get_connection():
     """Abre uma conexão Oracle (thin) com as credenciais do .env."""
     import oracledb                                  # import tardio: só quando for usar
@@ -90,15 +100,37 @@ def _trunc(valor, n):
     return s[:n] if s else None
 
 
+def _tabela():
+    """Nome da tabela do .env, validado (evita SQL injection pelo nome)."""
+    tabela = config.oracle_settings()["table"]
+    if not _TABELA_RE.match(tabela):
+        raise RuntimeError(f"Nome de tabela invalido em ORACLE_TABLE: {tabela!r}")
+    return tabela
+
+
+def ja_gravado(resposta, edicao_iso):
+    """True se JÁ existem linhas desta edição + tema na tabela.
+
+    Serve de TRAVA de custo: o job roda de hora em hora (o D.O. pode atrasar), e
+    sem isto a IA seria chamada de novo a cada execução sobre a MESMA edição.
+    Consultar o banco é barato; reler as páginas com a IA, não."""
+    con = get_connection()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            f"SELECT COUNT(*) FROM {_tabela()} WHERE EDICAO = :ed AND RESPOSTA = :r",
+            {"ed": _to_date(edicao_iso), "r": _trunc(resposta, _LIMITES["RESPOSTA"])},
+        )
+        return cur.fetchone()[0] > 0
+    finally:
+        con.close()
+
+
 def save_atos(resposta, edicao_iso, itens):
     """Grava os `itens` na tabela, para a edição `edicao_iso` (AAAA-MM-DD) e tema `resposta`.
 
     Apaga antes as linhas da mesma EDICAO+RESPOSTA (idempotência). Devolve o nº inserido."""
-    s = config.oracle_settings()
-    tabela = s["table"]
-    if not _TABELA_RE.match(tabela):
-        raise RuntimeError(f"Nome de tabela invalido em ORACLE_TABLE: {tabela!r}")
-
+    tabela = _tabela()
     edicao_date = _to_date(edicao_iso)
     resposta = _trunc(resposta, _LIMITES["RESPOSTA"])
 

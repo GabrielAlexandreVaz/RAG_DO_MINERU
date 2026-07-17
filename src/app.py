@@ -111,6 +111,10 @@ def api_ask():
         results = search(question, k=80, date=None, fts=(data.get("fts") or None))  # "todas edições": k alto
     else:
         results = search(question, k=k, date=scope, fts=(data.get("fts") or None))
+    # Cadernos "leves" (IB/II/IV/V) não têm PDF salvo -> sem miniatura. O front
+    # usa 'tem_imagem' para não chamar /api/page (que retornaria 404) nesses casos.
+    for r in results:
+        r["tem_imagem"] = _safe_pdf(r.get("pdf", "")) is not None
     out = {"question": question, "results": results,
            "resumo": "",                 # resumo em texto puro (para os downloads)
            "resumo_html": None,          # resumo (markdown -> HTML) para exibir

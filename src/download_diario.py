@@ -31,7 +31,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import config
@@ -317,6 +317,111 @@ def _count_pages(pdf_bytes):
             return doc.page_count
     except Exception:
         return None
+
+
+# ---------------------------------------------------- múltiplos cadernos (em memória)
+def _coletar_links_cadernos(page, alvos):
+    """Mapeia chave->URL absoluta do link de cada caderno alvo na página de seleção.
+
+    Casa pelo texto do link (ex.: 'Tribunal de Contas'); o href leva o token
+    `session` (efêmero) daquele caderno."""
+    out = {}
+    anchors = page.locator("a[href*='mostra_edicao']")
+    for i in range(anchors.count()):
+        a = anchors.nth(i)
+        try:
+            txt = (a.inner_text() or "").strip()
+            href = a.get_attribute("href") or ""
+        except Exception:
+            continue
+        if not href:
+            continue
+        for c in alvos:
+            if c["chave"] in out:
+                continue
+            if re.search(re.escape(c["match"]), txt, re.IGNORECASE):
+                out[c["chave"]] = urljoin(page.url, href)
+    return out
+
+
+def baixar_cadernos(estrategias=("leve",), pular=None):
+    """Baixa em MEMÓRIA os cadernos de config.CADERNOS cuja 'estrategia' esteja em
+    `estrategias`. NÃO salva nada em disco. Uma sessão do navegador para todos.
+
+    `pular(nome, edition_date) -> bool`: se devolver True, o caderno NÃO é baixado
+    (ex.: já está indexado) — evita rebaixar toda hora no job agendado.
+
+    Devolve {"edition_date": "AAAA-MM-DD", "cadernos": [{...caderno, "bytes": b|None}]}."""
+    from playwright.sync_api import (
+        TimeoutError as PlaywrightTimeoutError,
+        sync_playwright,
+    )
+
+    alvos = [c for c in config.CADERNOS if c.get("ativo") and c.get("estrategia") in estrategias]
+    if not alvos:
+        return {"edition_date": None, "cadernos": []}
+
+    captures = []
+    resultados = []
+    edition_date = None
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=config.DOWNLOAD_HEADLESS)
+        context = browser.new_context(
+            ignore_https_errors=True, accept_downloads=True,
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+        )
+        context.set_default_timeout(config.NAV_TIMEOUT_MS)
+        context.set_default_navigation_timeout(config.NAV_TIMEOUT_MS)
+
+        def on_response(response):
+            try:
+                if not _is_pdf_response(response.url, response.headers.get("content-type")) or not response.ok:
+                    return
+                body = response.body()
+                if _looks_like_pdf(body):
+                    captures.append((response.url, body))
+            except Exception:
+                pass
+
+        context.on("response", on_response)
+        page = context.new_page()
+        try:
+            _goto_cadernos(page)
+            edition_date = _parse_edition_date_from_url(page.url) or _hoje_iso()
+            # Idempotência ANTES de baixar: se já está indexado, nem abre o caderno.
+            pendentes = [c for c in alvos if not (pular and pular(c["nome"], edition_date))]
+            for c in alvos:
+                if c not in pendentes:
+                    _log(f"caderno '{c['nome']}' ja indexado ({edition_date}) -> nao baixa.")
+                    resultados.append({**c, "bytes": None})
+            if not pendentes:
+                _log("todos os cadernos leves ja indexados; nada a baixar.")
+                # 'page' ja carregou a selecao; nada mais a fazer.
+            links = _coletar_links_cadernos(page, pendentes) if pendentes else {}
+            for c in pendentes:
+                url = links.get(c["chave"])
+                if not url:
+                    _log(f"caderno '{c['nome']}' nao encontrado na pagina; pulando.")
+                    resultados.append({**c, "bytes": None})
+                    continue
+                captures.clear()
+                _log(f"abrindo caderno: {c['nome']}")
+                try:
+                    page.goto(url, wait_until="domcontentloaded")
+                except PlaywrightTimeoutError:
+                    pass
+                best = _wait_for_capture(page, captures, config.NAV_TIMEOUT_MS)
+                if best and _looks_like_pdf(best[1]):
+                    _log(f"  {c['nome']}: {len(best[1])} bytes")
+                    resultados.append({**c, "bytes": best[1]})
+                else:
+                    _log(f"  {c['nome']}: PDF nao capturado")
+                    resultados.append({**c, "bytes": None})
+        finally:
+            context.close()
+            browser.close()
+    return {"edition_date": edition_date, "cadernos": resultados}
 
 
 def main():

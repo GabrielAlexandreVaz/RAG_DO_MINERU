@@ -98,6 +98,20 @@ ULTIMA_EDICAO_URL = os.getenv(
     "https://www.ioerj.com.br/portal/modules/conteudoonline/do_ultima_edicao.php",
 ).strip()
 CADERNO_ALVO = os.getenv("CADERNO_ALVO", "Poder Executivo").strip()  # Parte I
+
+# Os 5 cadernos do DOERJ. 'match' = texto do link na pagina de selecao (do
+# _seleciona_edicao); 'estrategia': "completa" (Parte I -> salva + MinerU) ou
+# "leve" (demais -> lidas em memoria com PyMuPDF, texto indexado, PDF descartado).
+CADERNOS = [
+    {"chave": "parte_1",  "nome": "Parte I (Poder Executivo)",     "match": "Poder Executivo",   "ativo": True, "estrategia": "completa"},
+    {"chave": "parte_1b", "nome": "Parte IB (Tribunal de Contas)", "match": "Tribunal de Contas", "ativo": True, "estrategia": "leve"},
+    {"chave": "parte_2",  "nome": "Parte II (Poder Legislativo)",  "match": "Poder Legislativo", "ativo": True, "estrategia": "leve"},
+    {"chave": "parte_4",  "nome": "Parte IV (Municipalidades)",    "match": "Municipalidades",   "ativo": True, "estrategia": "leve"},
+    {"chave": "parte_5",  "nome": "Parte V (Publicações a Pedido)", "match": "Publica",          "ativo": True, "estrategia": "leve"},
+]
+
+# Nome do caderno da Parte I (usado para rotular no indice as paginas do MinerU).
+CADERNO_PARTE_I = "Parte I (Poder Executivo)"
 DOWNLOAD_HEADLESS = os.getenv("DOWNLOAD_HEADLESS", "true").strip().lower() in {"1", "true", "yes", "sim"}
 DOWNLOAD_TZ = os.getenv("DOWNLOAD_TZ", "America/Sao_Paulo").strip()  # fuso da data da edição
 NAV_TIMEOUT_MS = int(os.getenv("NAV_TIMEOUT_MS", "60000"))          # timeout de navegação

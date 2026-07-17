@@ -35,17 +35,40 @@ FALLBACK_RATIO = 0.5
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
+def _migrate_caderno(con):
+    """Se a tabela 'pages' existe SEM a coluna 'caderno', recria (com reindex).
+
+    Reindexar a Parte I é barato: o texto vem do content_list.json do MinerU já
+    salvo (não roda o MinerU de novo). Ao dropar 'pages' também limpamos
+    indexed_files para forçar o repovoamento com a coluna nova."""
+    row = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='pages'"
+    ).fetchone()
+    if not row:
+        return
+    cols = [r[1] for r in con.execute("PRAGMA table_info(pages)").fetchall()]
+    if "caderno" not in cols:
+        con.execute("DROP TABLE pages")
+        try:
+            con.execute("DELETE FROM indexed_files")
+        except sqlite3.OperationalError:
+            pass
+        con.commit()
+        print("[migracao] indice recriado com a coluna 'caderno' (Parte I sera reindexada).")
+
+
 def connect():
     """Abre (ou cria) o banco do índice e garante que as tabelas existem."""
     config.INDEX_DIR.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(config.DB_PATH)
+    _migrate_caderno(con)
     # Tabela virtual FTS5: guarda o texto por página e permite busca full-text.
-    #   pdf/date/page = UNINDEXED -> guardados, mas não entram na busca textual;
-    #   content = a coluna pesquisável;
+    #   pdf/caderno/date/page = UNINDEXED -> guardados, mas não entram na busca;
+    #   content = a coluna pesquisável (índice 4 -> usado no snippet do search.py);
     #   remove_diacritics 2 -> a busca ignora acentos (procurar "resolucao" acha "Resolução").
     con.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS pages USING fts5("
-        "pdf UNINDEXED, date UNINDEXED, page UNINDEXED, content, "
+        "pdf UNINDEXED, caderno UNINDEXED, date UNINDEXED, page UNINDEXED, content, "
         "tokenize='unicode61 remove_diacritics 2');"
     )
     # Tabela de controle: lembra quais PDFs já indexamos (para pular os repetidos).
@@ -150,8 +173,8 @@ def index_pdf(con, pdf_path, force=False, extract=False):
                 texto = m or p                                  # MinerU ok (ou vazio -> PDF)
             if texto.strip():
                 con.execute(
-                    "INSERT INTO pages(pdf, date, page, content) VALUES (?,?,?,?)",
-                    (name, date, page_idx + 1, texto),   # +1 -> página 1-based na UI
+                    "INSERT INTO pages(pdf, caderno, date, page, content) VALUES (?,?,?,?,?)",
+                    (name, config.CADERNO_PARTE_I, date, page_idx + 1, texto),  # +1 -> 1-based
                 )
                 n += 1
     finally:
@@ -164,6 +187,42 @@ def index_pdf(con, pdf_path, force=False, extract=False):
         (name, st.st_size, st.st_mtime, n),
     )
     con.commit()                                    # confirma as gravações no banco
+    return n
+
+
+def caderno_indexado(con, caderno, date):
+    """True se já há páginas deste caderno+edição no índice (idempotência das partes leves)."""
+    row = con.execute(
+        "SELECT 1 FROM pages WHERE caderno=? AND date=? LIMIT 1", (caderno, date)
+    ).fetchone()
+    return row is not None
+
+
+def index_caderno_bytes(con, caderno, date, pdf_bytes, chave="parte"):
+    """Indexa o TEXTO de um caderno a partir dos BYTES do PDF (via PyMuPDF), SEM salvar arquivo.
+
+    Usado para as Partes IB/II/IV/V (estratégia "leve"): lê o texto nativo do PDF
+    em memória e grava no FTS5 com o rótulo do caderno. Idempotente por (caderno, date).
+    Devolve o nº de páginas inseridas (0 se já estava indexado)."""
+    if caderno_indexado(con, caderno, date):
+        return 0
+    # 'pdf' é um identificador sintético (não existe arquivo em disco); serve para
+    # page_content() localizar o texto e para o site saber que NÃO há miniatura.
+    pdf_id = f"DOERJ_{date}_{chave}.pdf"
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    n = 0
+    try:
+        for page_idx in range(doc.page_count):
+            texto = doc[page_idx].get_text("text").strip()
+            if texto:
+                con.execute(
+                    "INSERT INTO pages(pdf, caderno, date, page, content) VALUES (?,?,?,?,?)",
+                    (pdf_id, caderno, date, page_idx + 1, texto),
+                )
+                n += 1
+    finally:
+        doc.close()
+    con.commit()
     return n
 
 

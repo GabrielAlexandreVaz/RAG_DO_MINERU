@@ -319,13 +319,20 @@ async function doSearch({ question, fts, full }) {
       // termos da busca -> marca-texto amarelo em cima do trecho na imagem da página
       const hl = encodeURIComponent(data.terms || '');
       sourcesEl.innerHTML = data.results.map(rr => {
+        const cad = rr.caderno ? `<span style="color:var(--muted)"> · ${esc(rr.caderno)}</span>` : '';
         const thumb = `/api/page?pdf=${encodeURIComponent(rr.pdf)}&page=${rr.page}&dpi=110&hl=${hl}`;
         const full  = `/api/page?pdf=${encodeURIComponent(rr.pdf)}&page=${rr.page}&dpi=220&hl=${hl}`;
+        // Cadernos "leves" (IB/II/IV/V) não têm PDF salvo -> sem miniatura.
+        const img = rr.tem_imagem
+          ? `<a class="thumb" href="${full}" target="_blank" rel="noopener">
+               <img loading="lazy" src="${thumb}" alt="página ${rr.page}"></a>`
+          : `<div class="thumb" style="display:flex;align-items:center;justify-content:center;
+               color:var(--muted);font-size:12px;text-align:center;padding:8px">
+               sem imagem de página<br>(caderno lido sem salvar PDF)</div>`;
         return `<div class="src">
-          <div class="meta">Edição <b>${esc(fmt(rr.date))}</b> · página <b>${rr.page}</b>
+          <div class="meta">Edição <b>${esc(fmt(rr.date))}</b> · página <b>${rr.page}</b>${cad}
             <span style="color:var(--muted)"> · score ${rr.score.toFixed(1)}</span></div>
-          <a class="thumb" href="${full}" target="_blank" rel="noopener">
-            <img loading="lazy" src="${thumb}" alt="página ${rr.page}"></a>
+          ${img}
           <div class="snip">${highlight(rr.snippet)}</div>
         </div>`;
       }).join('');

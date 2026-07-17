@@ -63,7 +63,7 @@ def _resolver_edicao(date):
     return datas[0]
 
 
-def gerar(tema, date=None, max_tokens=16000):
+def gerar(tema, date=None, max_tokens=16000, force=False):
     """Extrai os atos de UM tema numa edição e grava no Oracle. Devolve o nº inserido (ou None)."""
     if tema not in TEMAS:
         sys.exit(f"[ERRO] tema desconhecido: {tema}. Temas: {', '.join(TEMAS)} (ou 'all').")
@@ -71,6 +71,14 @@ def gerar(tema, date=None, max_tokens=16000):
 
     date = _resolver_edicao(date)
     print(f"[atos] tema={tema} ({info['label']}) | edicao: {date}")
+
+    # 0) TRAVA DE CUSTO: o job roda de hora em hora (o D.O. pode atrasar). Se esta
+    #    edicao+tema ja esta no banco, sai ANTES de chamar a IA (consulta e barata,
+    #    reler as paginas com a IA nao). --force reprocessa de proposito.
+    if not force and oracle_db.ja_gravado(info["label"], date):
+        print(f"[atos] edicao {date} / '{info['label']}' ja gravada no Oracle -> pulando "
+              "(use --force para reprocessar).")
+        return None
 
     # 1) Todas as páginas da edição que mencionam o tema.
     paginas = pages_matching(info["fts"], date)
@@ -109,12 +117,21 @@ def main():
                     help=f"Tema: {', '.join(TEMAS)} ou 'all' (padrao: exoneracao)")
     ap.add_argument("--date", default=None, help="Edicao AAAA-MM-DD (padrao: a mais recente)")
     ap.add_argument("--max-tokens", type=int, default=16000)
+    ap.add_argument("--force", action="store_true",
+                    help="Reprocessa mesmo se a edicao/tema ja estiver no Oracle (gasta IA)")
     args = ap.parse_args()
+
+    # Oracle nao configurado ainda? Avisa e sai SEM erro — assim o pipeline
+    # agendado nao quebra por causa de um destino que ainda nao foi preenchido.
+    if not oracle_db.configurado():
+        print("[atos] AVISO: Oracle nao configurado no .env (ORACLE_USER/PASSWORD/DSN). "
+              "Nada a gravar; pulando esta etapa.")
+        return
 
     temas = list(TEMAS) if args.tema == "all" else [args.tema]
     total = 0
     for t in temas:
-        n = gerar(t, date=args.date, max_tokens=args.max_tokens)
+        n = gerar(t, date=args.date, max_tokens=args.max_tokens, force=args.force)
         total += n or 0
     print(f"[done] {total} atos gravados no total ({len(temas)} tema(s)).")
 

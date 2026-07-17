@@ -39,7 +39,7 @@ PERGUNTA = (
 )
 
 
-def gerar(date=None, destino=None, max_tokens=32000):
+def gerar(date=None, destino=None, max_tokens=32000, force=False):
     """Gera o Excel das exonerações de uma edição. Devolve o caminho salvo (ou None)."""
     try:
         sys.stdout.reconfigure(encoding="utf-8")     # acentos no log do Windows
@@ -55,6 +55,14 @@ def gerar(date=None, destino=None, max_tokens=32000):
             sys.exit("[ERRO] nenhuma edicao no indice.")
         date = datas[0]
     print(f"[exonerar] edicao: {date}")
+
+    # 1b) TRAVA DE CUSTO: o job roda de hora em hora (o D.O. pode atrasar). Se o
+    #     Excel desta edicao ja existe, sai ANTES de chamar a IA. --force refaz.
+    destino = Path(destino) if destino else config.EXONERACOES_DIR
+    arquivo = destino / f"exoneracoes_{date}.xlsx"
+    if not force and arquivo.exists():
+        print(f"[exonerar] {arquivo.name} ja existe -> pulando (use --force para refazer).")
+        return arquivo
 
     # 2) Todas as páginas da edição que mencionam exoneração.
     paginas = pages_matching("exoner*", date)
@@ -84,9 +92,7 @@ def gerar(date=None, destino=None, max_tokens=32000):
     })
 
     # 5) Salva na pasta de destino (um arquivo por dia).
-    destino = Path(destino) if destino else config.EXONERACOES_DIR
     destino.mkdir(parents=True, exist_ok=True)       # cria a pasta se não existir
-    arquivo = destino / f"exoneracoes_{date}.xlsx"
     arquivo.write_bytes(xlsx)
     print(f"[ok] {len(itens)} exoneracoes -> {arquivo}")
     return arquivo
@@ -97,8 +103,10 @@ def main():
     ap.add_argument("--date", default=None, help="Edicao AAAA-MM-DD (padrao: a mais recente)")
     ap.add_argument("--dir", default=None, help="Pasta de destino (padrao: config.EXONERACOES_DIR)")
     ap.add_argument("--max-tokens", type=int, default=32000)
+    ap.add_argument("--force", action="store_true",
+                    help="Refaz o Excel mesmo se ele ja existir (gasta IA)")
     args = ap.parse_args()
-    gerar(date=args.date, destino=args.dir, max_tokens=args.max_tokens)
+    gerar(date=args.date, destino=args.dir, max_tokens=args.max_tokens, force=args.force)
 
 
 if __name__ == "__main__":

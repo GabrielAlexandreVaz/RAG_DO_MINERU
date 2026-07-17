@@ -100,18 +100,19 @@ def search(query, k=4, date=None, fts=None):
         return []
     # snippet(...) devolve um pedacinho do texto com os termos entre [colchetes]
     # (o front troca [ ] por marca-texto amarelo). O 3 é o índice da coluna 'content'.
-    snip = "snippet(pages, 3, '[', ']', ' ... ', 14)"
+    # content é a coluna 4 (pdf=0, caderno=1, date=2, page=3, content=4).
+    snip = "snippet(pages, 4, '[', ']', ' ... ', 14)"
     con = sqlite3.connect(config.DB_PATH)
     try:
         if date:                                    # busca restrita a uma edição
             rows = con.execute(
-                f"SELECT pdf, date, page, {snip} AS snip, bm25(pages) AS score "
+                f"SELECT pdf, caderno, date, page, {snip} AS snip, bm25(pages) AS score "
                 "FROM pages WHERE pages MATCH ? AND date = ? ORDER BY score LIMIT ?",
                 (fts, date, k),
             ).fetchall()
         else:                                       # busca em todas as edições
             rows = con.execute(
-                f"SELECT pdf, date, page, {snip} AS snip, bm25(pages) AS score "
+                f"SELECT pdf, caderno, date, page, {snip} AS snip, bm25(pages) AS score "
                 "FROM pages WHERE pages MATCH ? ORDER BY score LIMIT ?",
                 (fts, k),
             ).fetchall()
@@ -121,7 +122,7 @@ def search(query, k=4, date=None, fts=None):
         con.close()
     # Transforma cada linha do banco num dicionário fácil de usar no resto do app.
     return [
-        {"pdf": r[0], "date": r[1], "page": int(r[2]), "snippet": r[3], "score": r[4]}
+        {"pdf": r[0], "caderno": r[1], "date": r[2], "page": int(r[3]), "snippet": r[4], "score": r[5]}
         for r in rows
     ]
 
@@ -148,11 +149,11 @@ def pages_matching(fts, date, limit=80):
     páginas com exonerações do dia (não só as mais relevantes)."""
     if not config.DB_PATH.exists():
         return []
-    snip = "snippet(pages, 3, '[', ']', ' ... ', 14)"
+    snip = "snippet(pages, 4, '[', ']', ' ... ', 14)"   # content é a coluna 4
     con = sqlite3.connect(config.DB_PATH)
     try:
         rows = con.execute(
-            f"SELECT pdf, date, page, {snip} AS snip, bm25(pages) AS score "
+            f"SELECT pdf, caderno, date, page, {snip} AS snip, bm25(pages) AS score "
             "FROM pages WHERE pages MATCH ? AND date = ? ORDER BY page LIMIT ?",
             (fts, date, limit),
         ).fetchall()
@@ -161,6 +162,6 @@ def pages_matching(fts, date, limit=80):
     finally:
         con.close()
     return [
-        {"pdf": r[0], "date": r[1], "page": int(r[2]), "snippet": r[3], "score": r[4]}
+        {"pdf": r[0], "caderno": r[1], "date": r[2], "page": int(r[3]), "snippet": r[4], "score": r[5]}
         for r in rows
     ]

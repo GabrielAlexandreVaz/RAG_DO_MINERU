@@ -67,11 +67,32 @@ def oracle_settings():
         "password": os.getenv("ORACLE_PASSWORD", ""),   # senha: NÃO dar strip (pode ter espaço)
         "dsn": os.getenv("ORACLE_DSN", "").strip(),      # ex.: host:1521/SERVICE_NAME
         "table": os.getenv("ORACLE_TABLE", "DOERJ_ATOS_PESSOAL").strip(),
+        "schema": os.getenv("ORACLE_SCHEMA", "").strip(),  # ex.: COE_IA (vazio = schema do usuário)
     }
+
+
+def nomes_monitorados():
+    """Lê a lista de nomes monitorados de monitorados.txt (um por linha; # = comentário).
+
+    Usada pela varredura de nomes no DOERJ (monitor_estruturado)."""
+    f = ROOT / "monitorados.txt"
+    if not f.exists():
+        return []
+    nomes = []
+    for ln in f.read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if ln and not ln.startswith("#"):
+            nomes.append(ln)
+    return nomes
 
 
 # Modelo (ou, na Azure, o NOME DO DEPLOYMENT) que redige a resposta.
 MODEL = os.getenv("RAG_MODEL", "claude-opus-4-8").strip()
+
+# Modelo (deployment) do JOB de monitoramento estruturado. É extração em massa
+# (muitas páginas por edição) -> vale um modelo mais barato (ex.: Sonnet 4.6).
+# Vazio -> usa o MODEL (Opus). O site (/api/ask) sempre usa o MODEL.
+MONITOR_MODEL = os.getenv("MONITOR_MODEL", "").strip() or MODEL
 
 # Pasta onde ficam os PDFs do DOERJ (a mesma que o seu job salva no OneDrive).
 DOWNLOADS_DIR = Path(

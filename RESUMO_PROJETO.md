@@ -120,7 +120,7 @@ Logs: `logs\atualizar.log` e `logs\exoneracoes.log`.
 - A **chave da API é relida do `.env` a cada pergunta** — trocar a chave passa a valer na hora,
   sem reiniciar o servidor (resolvia o antigo erro 401 "invalid x-api-key").
 
-**Excel:** só a tabela (sem bloco de Pergunta/Edição/Resumo no topo), com o cabeçalho **fixo** ao rolar.
+**Excel:** só a tabela (sem bloco de Pergunta/Edição/Resumo no topo), com o cabeçalho **fixo** ao rolar. 
 
 ---
 
@@ -133,7 +133,7 @@ Logs: `logs\atualizar.log` e `logs\exoneracoes.log`.
 
 ---
 
-## 8. Como operar (resumo prático)
+## 8. Como operar o sistema       
 
 ```bash
 # Ligar o site

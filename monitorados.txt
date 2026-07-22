@@ -1,0 +1,21 @@
+# Nomes monitorados no DOERJ (um por linha; linhas com # são ignoradas).
+# A varredura casa o PRIMEIRO e o ÚLTIMO nome, tolerando nomes do meio e acentos
+# (ex.: "Guilherme Mercês" casa "Guilherme Macedo Reis Mercês").
+Guilherme Mercês
+Lucas Antonio Gonçalves Salvetti
+Roberto Gomides de Barros Filho
+Carlos Alberto Cincurá de Andrade
+Edson Tadeu Teixeira Amantea
+Fernando Salavracos Komatsu
+Fabio Rocha Verbicario
+Gabriel Mac Dowell Blum
+Rafaelle de Abreu Orlando
+Tomaz Lucas Santos Leal
+Diana Cabral Siqueira
+Liliane Figueiredo
+Yasmim da Costa Monteiro
+Raphael Antonio Nogueira
+Ana Luiza Pereira Lima
+Karine Tomaz Veiga
+Marcelo Zenni Travassos
+Alvaro Marques Neto

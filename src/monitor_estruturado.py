@@ -1,3 +1,4 @@
+
 """
 ============================================================================
 monitor_estruturado.py · Reproduz, ESTRUTURADO, o "Monitoramento DOERJ"
@@ -15,6 +16,7 @@ Uso:
 ============================================================================
 """
 import argparse
+import difflib
 import json
 import re
 import sqlite3
@@ -24,6 +26,7 @@ import unicodedata
 from pathlib import Path
 
 import config
+import oracle_db
 from search import list_dates, page_content
 
 # categoria (da IA) -> número da seção do relatório
@@ -39,6 +42,21 @@ CATEGORIA_SECAO = {
     "MUNICIPALIDADES_PEDIDO": 8,
 }
 
+_CATEGORIAS_VALIDAS = list(CATEGORIA_SECAO.keys())
+
+
+def _canon_categoria(cat):
+    """Normaliza a categoria vinda da IA para o conjunto canonico. O modelo as vezes
+    erra a grafia (ex.: 'OBSERVACAO_EXECUTIVE' sem o 'A'); aqui casamos pelo mais
+    parecido. Categoria irreconhecivel cai em OBSERVACAO_EXECUTIVA (nunca descarta o
+    item nem cria um TIPO invalido no banco / seção fantasma no Excel)."""
+    c = (cat or "").strip().upper().replace(" ", "_").replace("-", "_")
+    if c in CATEGORIA_SECAO:
+        return c
+    aprox = difflib.get_close_matches(c, _CATEGORIAS_VALIDAS, n=1, cutoff=0.8)
+    return aprox[0] if aprox else "OBSERVACAO_EXECUTIVA"
+
+
 SECOES = {
     1: "1 - Prazos Criticos",
     2: "2 - Movimentacoes de Pessoal",
@@ -50,10 +68,10 @@ SECOES = {
     8: "8 - Municipalidades e Pedido (IV-V)",
 }
 
-COLUNAS = ["Tipo do Ato", "Numero/Ano", "Orgao", "Pessoa", "Cargo",
-           "Processo", "Vigencia", "Resumo", "Caderno", "Pagina"]
-CHAVES = ["tipo_ato", "numero_ano", "orgao", "pessoa", "cargo",
-          "processo", "vigencia", "resumo", "caderno", "pagina"]
+COLUNAS = ["Tipo do Ato", "Numero/Ano", "Orgao", "Pessoa", "Cargo", "Processo",
+           "Vigencia", "Data do Ato", "Prazo", "Resumo", "Caderno", "Pagina"]
+CHAVES = ["tipo_ato", "numero_ano", "orgao", "pessoa", "cargo", "processo",
+          "vigencia", "data_ato", "prazo", "resumo", "caderno", "pagina"]
 
 SYSTEM = (
     "Voce e analista senior da SEFAZ-RJ com 15 anos lendo o DOERJ. Do TEXTO fornecido, "
@@ -70,21 +88,28 @@ SYSTEM = (
     "sem efeito direto na Fazenda. Municipio (prefeitura) so entra se a SEFAZ for parte.\n\n"
     "Responda EXCLUSIVAMENTE com um objeto JSON valido (sem texto antes/depois, sem ```), no "
     'formato: {"itens":[{"categoria":"","tipo_ato":"","numero_ano":"","orgao":"","pessoa":"",'
-    '"cargo":"","processo":"","vigencia":"","resumo":"","pagina":""}]}\n\n'
+    '"cargo":"","processo":"","vigencia":"","data_ato":"","prazo":"","resumo":"","pagina":""}]}\n\n'
     "categoria = UMA de: PRAZO_CRITICO | MOVIMENTACAO_PESSOAL | NOMES_MONITORADOS | "
     "OBSERVACAO_EXECUTIVA | DESTAQUE_CONTROLE_INTERNO | EXPEDIENTE_PONTO_FACULTATIVO | "
     "TCE_SEFAZ | LEGISLATIVO_FAZENDARIO | MUNICIPALIDADES_PEDIDO.\n"
     "Guia de categoria:\n"
     "- PRAZO_CRITICO: ato que gera acao/prazo para a SEFAZ (sessao de julgamento, vencimento, "
-    "verificacao, disponibilizacao de acordao no portal, licenca com inicio/fim). So se o "
-    "titular do prazo for a SEFAZ (nao terceiro).\n"
+    "verificacao, disponibilizacao de acordao no portal, licenca com inicio/fim). INCLUA aqui "
+    "licitacoes/pregoes/concorrencias/chamamentos em que a SEFAZ e a contratante/promotora, "
+    "quando houver data de abertura de sessao, entrega/abertura de propostas ou habilitacao "
+    "(mesmo que quem cumpra o prazo sejam os licitantes: a SEFAZ conduz a sessao). So se o "
+    "titular OU o condutor do prazo for a SEFAZ (nao terceiro). Preencha 'prazo' com a data-"
+    "limite (ex.: data de entrega de propostas ou da sessao).\n"
     "- MOVIMENTACAO_PESSOAL: nomeacao/exoneracao/designacao/remocao/cessao/afastamento de "
     "servidor fazendario (ou cargo de comando de outro poder). Membros de comissao NAO contam.\n"
     "- NOMES_MONITORADOS: ato concreto sobre Guilherme Merces (Secretario de Fazenda) ou sobre "
     "o Chefe de Gabinete / Subsecretario / Subsecretario Adjunto da SEFAZ.\n"
     "- OBSERVACAO_EXECUTIVA: decretos com impacto orcamentario (credito suplementar/dotacao), "
-    "resolucoes, portarias de superintendencia, atas de colegiado, Conselho de Contribuintes, "
-    "termos aditivos, cancelamento de IE, instituicao de comissao.\n"
+    "leis e leis complementares de interesse fazendario (LDO, LOA, diretrizes orcamentarias), "
+    "MENSAGENS DE VETO a dispositivos com impacto fazendario (gere um item PROPRIO para o veto, "
+    "SEPARADO da lei sancionada, citando os artigos vetados e o motivo do veto), resolucoes, "
+    "portarias de superintendencia, atas de colegiado, Conselho de Contribuintes, termos "
+    "aditivos, cancelamento de IE, instituicao de comissao.\n"
     "- DESTAQUE_CONTROLE_INTERNO: Controle Interno, Corregedoria Tributaria (CTCE), Auditoria "
     "Interna/AGE com vinculo SEFAZ, Tomada de Contas Especial da SEFAZ.\n"
     "- EXPEDIENTE_PONTO_FACULTATIVO: ponto facultativo/expediente/feriado/recesso estadual.\n"
@@ -97,8 +122,20 @@ SYSTEM = (
     "- MUNICIPALIDADES_PEDIDO: ato (Partes IV/V) onde a SEFAZ/Rioprevidencia e a publicadora, "
     "contratante ou conveniada. NAO inclua atos de prefeituras ou de outras secretarias (ex.: "
     "SEDEC) so por citarem 'Fazenda' generico.\n"
-    "Preencha 'pagina' com o numero do rotulo [pagina N]. Deixe campos vazios como \"\". "
-    "Nao invente. Na duvida sobre relevancia para a SEFAZ, NAO inclua. Se nada relevante, itens=[]."
+    "CONSOLIDACAO: quando UM MESMO ato (ex.: um despacho do Secretario, um edital) decide/julga "
+    "VARIOS itens homogeneos de uma vez (ex.: 'julgamento de N recursos', lista de varios "
+    "processos/contribuintes), gere UM UNICO item informando a QUANTIDADE no 'resumo' "
+    "(ex.: '13 recursos julgados, todos providos...') e citando as principais partes, em vez de "
+    "um item por sub-ato ou de apenas um exemplo.\n"
+    "FIDELIDADE: transcreva 'cargo', 'pessoa' e 'orgao' EXATAMENTE como aparecem no D.O., sem "
+    "corrigir grafia nem alterar genero (ex.: se o texto diz 'Auditor Fiscal', nao escreva "
+    "'Auditora Fiscal').\n"
+    "Preencha 'pagina' com o numero do rotulo [pagina N].\n"
+    "'data_ato' = data em que o ato foi assinado/publicado, se houver (formato DD/MM/AAAA).\n"
+    "'prazo' = data-limite da acao, quando houver (tipico em PRAZO_CRITICO: sessao, vencimento, "
+    "entrega). Se nao houver data, deixe \"\".\n"
+    "Deixe campos vazios como \"\". Nao invente datas. "
+    "Na duvida sobre relevancia para a SEFAZ, NAO inclua. Se nada relevante, itens=[]."
 )
 
 
@@ -287,7 +324,7 @@ def _mapear_bloco(caderno, paginas, client, max_tokens=8000):
     return itens, usage, True
 
 
-def gerar(date=None, destino=None, chunk=4, todas_paginas=False):
+def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
@@ -301,6 +338,16 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False):
         date = datas[0]
     if not config.current_api_key():
         sys.exit("[ERRO] ANTHROPIC_API_KEY nao definido no .env.")
+
+    # Trava de idempotencia (para o pipeline horario): se o Excel CANONICO desta
+    # edicao ja existe e nao e --force, nao re-extrai (economiza IA). O canonico so
+    # e gravado numa rodada COMPLETA, entao existir = ja foi processada com sucesso.
+    destino = Path(destino) if destino else (config.ROOT / "relatorios")
+    destino.mkdir(parents=True, exist_ok=True)
+    canonico = destino / f"monitoramento_{date}.xlsx"
+    if canonico.exists() and not force:
+        print(f"[monitor] {canonico.name} ja existe -> pulando (use --force para refazer).")
+        return canonico
 
     client = config.get_client()
     print(f"[monitor] modelo da extracao: {config.MONITOR_MODEL}"
@@ -327,9 +374,14 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False):
             uin += usage["input"]; uout += usage["output"]
             time.sleep(2)                 # espaça as chamadas (evita rate-limit da Foundry)
 
+    # Normaliza a categoria da IA para o conjunto canônico (corrige typos do modelo,
+    # ex.: OBSERVACAO_EXECUTIVE -> OBSERVACAO_EXECUTIVA) ANTES de gravar/filtrar.
+    for it in todos:
+        it["categoria"] = _canon_categoria(it.get("categoria"))
+
     # NOMES_MONITORADOS vem da varredura DETERMINÍSTICA (confiável, sem depender
     # da IA): descarta o que a IA marcou nessa categoria e usa a lista de nomes.
-    todos = [it for it in todos if (it.get("categoria") or "").strip().upper() != "NOMES_MONITORADOS"]
+    todos = [it for it in todos if it.get("categoria") != "NOMES_MONITORADOS"]
     monit = _scan_monitorados(date)
     todos.extend(monit)
     if monit:
@@ -342,9 +394,8 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False):
           f"falhas: {blocos_falha} (tokens: entrada {uin} / saida {uout})")
 
     # Não sobrescreve um relatório COMPLETO com um PARCIAL: parcial vai para
-    # *_PARCIAL.xlsx; só uma rodada sem falhas grava o nome canônico.
-    destino = Path(destino) if destino else (config.ROOT / "relatorios")
-    destino.mkdir(parents=True, exist_ok=True)
+    # *_PARCIAL.xlsx; só uma rodada sem falhas grava o nome canônico (destino já
+    # criado na trava acima).
     sufixo = "" if completo else "_PARCIAL"
     arquivo = destino / f"monitoramento_{date}{sufixo}.xlsx"
     _build_xlsx(arquivo, date, todos, blocos_total, blocos_falha)
@@ -354,6 +405,17 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False):
         print(f"[ATENCAO] relatorio PARCIAL ({blocos_falha}/{blocos_total} blocos falharam na IA). "
               f"NAO sobrescreveu o relatorio canonico; salvo como -> {arquivo}. "
               "Regenere quando a IA normalizar.")
+
+    # Grava no Oracle (002A) só quando a rodada foi COMPLETA (evita dados parciais).
+    if completo:
+        if oracle_db.configurado() and config.oracle_settings().get("table_monitor"):
+            try:
+                n = oracle_db.salvar_monitoramento(date, todos)
+                print(f"[ok] {n} itens gravados no Oracle (002A) para a edicao {date}.")
+            except Exception as e:  # noqa: BLE001 - nao derruba o job por falha de banco
+                print(f"[ATENCAO] falha ao gravar no Oracle (002A): {type(e).__name__}: {str(e)[:200]}")
+        else:
+            print("[monitor] Oracle/002A nao configurado -> gravado so o Excel.")
     return arquivo
 
 
@@ -413,8 +475,11 @@ def main():
     ap.add_argument("--chunk", type=int, default=4, help="Paginas por chamada de IA (padrao: 4)")
     ap.add_argument("--todas-paginas", action="store_true",
                     help="Desliga o pre-filtro SEFAZ e manda TODAS as paginas a IA (mais caro)")
+    ap.add_argument("--force", action="store_true",
+                    help="Reprocessa mesmo se o Excel canonico do dia ja existir (gasta IA)")
     args = ap.parse_args()
-    gerar(date=args.date, destino=args.dir, chunk=args.chunk, todas_paginas=args.todas_paginas)
+    gerar(date=args.date, destino=args.dir, chunk=args.chunk,
+          todas_paginas=args.todas_paginas, force=args.force)
 
 
 if __name__ == "__main__":

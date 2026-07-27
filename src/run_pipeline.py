@@ -83,11 +83,16 @@ def main():
         _run("2/4 Cadernos leves IB/II/IV/V (ler_cadernos)", [rag_py, src / "ler_cadernos.py"])
 
     # 3) Exoneracoes -> Excel no OneDrive.
-    _run("3/4 Exoneracoes -> Excel", [rag_py, src / "exonerar.py"] + forca)
+    _run("3/5 Exoneracoes -> Excel", [rag_py, src / "exonerar.py"] + forca)
 
-    # 4) Atos de pessoal -> Oracle.
-    _run("4/4 Atos de pessoal -> Oracle",
+    # 4) Atos de pessoal -> Oracle (tabela 001A).
+    _run("4/5 Atos de pessoal -> Oracle (001A)",
          [rag_py, src / "atos_pessoal.py", "--tema", args.tema] + forca)
+
+    # 5) Monitor estruturado (8 temas) -> Excel + Oracle (002A). Usa o MONITOR_MODEL
+    #    (Haiku, mais barato). Idempotente: pula se o Excel canonico do dia ja existe.
+    _run("5/5 Monitor 8 temas -> Excel + Oracle (002A)",
+         [rag_py, src / "monitor_estruturado.py"] + forca)
 
     print("\n[done] pipeline completo com sucesso.", flush=True)
 

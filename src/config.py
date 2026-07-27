@@ -66,7 +66,8 @@ def oracle_settings():
         "user": os.getenv("ORACLE_USER", "").strip(),
         "password": os.getenv("ORACLE_PASSWORD", ""),   # senha: NÃO dar strip (pode ter espaço)
         "dsn": os.getenv("ORACLE_DSN", "").strip(),      # ex.: host:1521/SERVICE_NAME
-        "table": os.getenv("ORACLE_TABLE", "DOERJ_ATOS_PESSOAL").strip(),
+        "table": os.getenv("ORACLE_TABLE", "DOERJ_ATOS_PESSOAL").strip(),        # 001A: atos de pessoal
+        "table_monitor": os.getenv("ORACLE_TABLE_MONITOR", "").strip(),          # 002A: monitor (8 temas)
         "schema": os.getenv("ORACLE_SCHEMA", "").strip(),  # ex.: COE_IA (vazio = schema do usuário)
     }
 

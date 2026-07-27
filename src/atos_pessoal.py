@@ -99,11 +99,17 @@ def gerar(tema, date=None, max_tokens=16000, force=False):
         print("[atos] a IA nao encontrou atos -> nada a gravar.")
         return None
 
-    # 3) Grava no Oracle (idempotente: limpa a edicao+tema antes).
-    n = oracle_db.save_atos(info["label"], date, itens)
-    print(f"[ok] {n} atos de '{info['label']}' -> Oracle ({config.oracle_settings()['table']}) "
-          f"[edicao {date}]")
-    return n
+    # 3) Grava no Oracle (idempotente: limpa a edicao+tema antes). Uma falha de
+    #    banco (ex.: sem permissao de escrita) avisa e NAO derruba o pipeline.
+    try:
+        n = oracle_db.save_atos(info["label"], date, itens)
+        print(f"[ok] {n} atos de '{info['label']}' -> Oracle ({config.oracle_settings()['table']}) "
+              f"[edicao {date}]")
+        return n
+    except Exception as e:  # noqa: BLE001
+        print(f"[ATENCAO] falha ao gravar '{info['label']}' no Oracle: "
+              f"{type(e).__name__}: {str(e)[:200]}")
+        return None
 
 
 def main():

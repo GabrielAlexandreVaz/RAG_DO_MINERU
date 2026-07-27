@@ -17,7 +17,10 @@ import json
 from xml.sax.saxutils import escape   # deixa &, <, > seguros dentro do PDF
 
 # Chave interna de cada campo (usada no JSON e no schema da IA).
-CAMPOS = ("tipo", "numero", "data", "orgao", "pessoa", "cargo",
+# 'id_funcional' é extraído para a tabela Oracle 001A (identificador único do
+# servidor), mas NÃO entra em COLUNAS de propósito: o Excel/PDF/web mantêm o
+# layout atual. Se um dia quiser exibi-lo, basta acrescentar em COLUNAS também.
+CAMPOS = ("tipo", "numero", "data", "orgao", "pessoa", "id_funcional", "cargo",
           "objeto", "processo", "pagina", "edicao")
 
 # (chave, cabeçalho exibido) — a ORDEM aqui é a ordem das colunas em todo lugar.

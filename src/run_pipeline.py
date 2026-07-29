@@ -7,12 +7,15 @@ Roda cada etapa em sequência; SÓ avança se a anterior terminou com sucesso
 uma tem seu próprio código de saída.
 
 Etapas:
-  0) Download (OPCIONAL, --download) -> download_diario.py (Playwright).
-     Por padrão NÃO baixa: quem baixa é a tarefa "DOERJ Downloader" (projeto
-     diario-rj), que já roda de hora em hora e deixa o PDF em DOWNLOADS_DIR.
-  1) MinerU + indice -> index_build.py --latest (idempotente: pula se ja indexou).
-  2) Exoneracoes -> Excel  -> exonerar.py      (pula se o .xlsx do dia ja existe).
-  3) Atos de pessoal -> Oracle -> atos_pessoal.py (pula se ja gravado no banco).
+  1) Download (OPCIONAL, --download) -> download_diario.py (Playwright).
+     O run_pipeline.bat usa --download. NÃO derruba o pipeline se falhar: o PDF
+     pode já estar baixado de uma execução anterior e faltar só gravar no Oracle.
+  2) MinerU + indice -> index_build.py --latest (idempotente: pula se ja indexou).
+  3) Cadernos leves IB/II/IV/V -> ler_cadernos.py (indexa sem salvar PDF).
+  4) Exoneracoes -> Excel  -> exonerar.py      (pula se o .xlsx do dia ja existe).
+  5) Atos de pessoal -> Oracle 001A -> atos_pessoal.py (pula se ja gravado).
+  6) Monitor 8 temas -> Excel + Oracle 002A -> monitor_estruturado.py.
+  +) Limpeza (retenção de disco) -> limpar.py. Também não derruba o pipeline.
 
 POR QUE ISTO EXISTE (e roda de hora em hora): o D.O. nao tem hora fixa — pode
 sair as 08:00 ou as 10:00. Um job que roda 1x as 08:05 perde a edicao quando ela
@@ -69,30 +72,37 @@ def main():
     forca = ["--force"] if args.force else []
 
     # 0) Download (opt-in). Requer: pip install playwright.
+    #    NAO usa _run de proposito: uma instabilidade do portal do IOERJ nao pode
+    #    impedir as etapas seguintes. O PDF pode ja estar em DOWNLOADS_DIR de uma
+    #    execucao anterior (o job roda de hora em hora) e faltar so a gravacao no
+    #    Oracle. Se nao houver nada para ler, o passo 1 falha com mensagem propria.
     if args.download:
-        _run("0/3 Download do D.O. (Playwright)", [rag_py, src / "download_diario.py"])
+        print("\n===== 1/6 Download do D.O. (Playwright) =====", flush=True)
+        if subprocess.run([str(rag_py), str(src / "download_diario.py")]).returncode != 0:
+            print("[ATENCAO] o download falhou; seguindo com o que ja estiver baixado.",
+                  flush=True)
 
     # 1) MinerU + indice da Parte I (edicao mais recente). Idempotente e barato.
-    _run("1/4 MinerU + indice Parte I (index_build --latest)",
+    _run("2/6 MinerU + indice Parte I (index_build --latest)",
          [rag_py, src / "index_build.py", "--latest"])
 
     # 2) Cadernos leves (IB/II/IV/V): le em memoria e indexa (sem salvar PDF).
     #    So roda se o Playwright estiver instalado; senao, avisa e segue.
     if args.skip_cadernos:
-        print("[skip] passo 2 (cadernos leves) pulado por --skip-cadernos.", flush=True)
+        print("[skip] passo 3/6 (cadernos leves) pulado por --skip-cadernos.", flush=True)
     else:
-        _run("2/4 Cadernos leves IB/II/IV/V (ler_cadernos)", [rag_py, src / "ler_cadernos.py"])
+        _run("3/6 Cadernos leves IB/II/IV/V (ler_cadernos)", [rag_py, src / "ler_cadernos.py"])
 
-    # 3) Exoneracoes -> Excel no OneDrive.
-    _run("3/5 Exoneracoes -> Excel", [rag_py, src / "exonerar.py"] + forca)
+    # 3) Exoneracoes -> Excel (EXONERACOES_DIR).
+    _run("4/6 Exoneracoes -> Excel", [rag_py, src / "exonerar.py"] + forca)
 
     # 4) Atos de pessoal -> Oracle (tabela 001A).
-    _run("4/5 Atos de pessoal -> Oracle (001A)",
+    _run("5/6 Atos de pessoal -> Oracle (001A)",
          [rag_py, src / "atos_pessoal.py", "--tema", args.tema] + forca)
 
     # 5) Monitor estruturado (8 temas) -> Excel + Oracle (002A). Usa o MONITOR_MODEL
     #    (Haiku, mais barato). Idempotente: pula se o Excel canonico do dia ja existe.
-    _run("5/5 Monitor 8 temas -> Excel + Oracle (002A)",
+    _run("6/6 Monitor 8 temas -> Excel + Oracle (002A)",
          [rag_py, src / "monitor_estruturado.py"] + forca)
 
     # 6) Retencao de disco. NAO usa _run: falha de limpeza nao pode marcar como

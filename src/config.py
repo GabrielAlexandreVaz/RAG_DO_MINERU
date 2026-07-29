@@ -24,6 +24,24 @@ ROOT = Path(__file__).resolve().parent.parent
 # Carrega o .env da raiz -> as variáveis ficam disponíveis via os.getenv().
 load_dotenv(ROOT / ".env")
 
+# --- Runtime autocontido (servidor) -----------------------------------------
+# Por padrão, o MinerU guarda a configuração em ~/mineru.json, os modelos em
+# ~/.cache/modelscope e o Playwright o navegador em ~/AppData. Isso amarra o job
+# ao PERFIL da conta do Windows — num servidor, a tarefa agendada pode rodar com
+# outro usuário e nada é encontrado.
+#
+# Se o deploy\instalar.bat tiver colocado essas coisas DENTRO do projeto,
+# apontamos as ferramentas para cá. Como usamos setdefault, uma variável já
+# definida no ambiente ou no .env continua mandando; e se as pastas não existirem
+# (instalação antiga, com tudo no perfil), nada muda.
+for _var, _alvo in (
+    ("MINERU_TOOLS_CONFIG_JSON", ROOT / "mineru.json"),   # config do MinerU
+    ("MODELSCOPE_CACHE", ROOT / "modelos"),               # os ~413 MB de modelos
+    ("PLAYWRIGHT_BROWSERS_PATH", ROOT / "navegadores"),   # o Chromium do download
+):
+    if _alvo.exists():
+        os.environ.setdefault(_var, str(_alvo))
+
 # Chave da API da Anthropic (Claude). Sem ela, a BUSCA funciona, mas a
 # RESPOSTA da IA não. O .strip() remove espaços acidentais nas pontas.
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -68,14 +86,25 @@ def oracle_settings():
         "dsn": os.getenv("ORACLE_DSN", "").strip(),      # ex.: host:1521/SERVICE_NAME
         "table": os.getenv("ORACLE_TABLE", "DOERJ_ATOS_PESSOAL").strip(),        # 001A: atos de pessoal
         "table_monitor": os.getenv("ORACLE_TABLE_MONITOR", "").strip(),          # 002A: monitor (8 temas)
+        # 001B: palavras-chave dos atos de pessoal (o que procurar no D.O.).
+        "table_palavras": os.getenv(
+            "ORACLE_TABLE_PALAVRAS", "IA0001_IOERJ_RAG_DIARIO_INTELIGENTE_001B").strip(),
+        # 002B: palavras do pre-filtro do monitor (quais paginas vao para a IA).
+        "table_filtro": os.getenv(
+            "ORACLE_TABLE_FILTRO", "IA0001_IOERJ_RAG_DIARIO_INTELIGENTE_002B").strip(),
+        # 002N: cadastro dos nomes monitorados (fonte da verdade da varredura de nomes).
+        "table_monitorados": os.getenv(
+            "ORACLE_TABLE_MONITORADOS", "IA0001_IOERJ_RAG_DIARIO_INTELIGENTE_002N").strip(),
         "schema": os.getenv("ORACLE_SCHEMA", "").strip(),  # ex.: COE_IA (vazio = schema do usuário)
     }
 
 
 def nomes_monitorados():
-    """Lê a lista de nomes monitorados de monitorados.txt (um por linha; # = comentário).
+    """Lê a lista de nomes de monitorados.txt (um por linha; # = comentário).
 
-    Usada pela varredura de nomes no DOERJ (monitor_estruturado)."""
+    FALLBACK: a fonte da verdade dos nomes é a tabela Oracle 002N
+    (oracle_db.listar_monitorados). Este arquivo só é usado quando o banco não
+    responde, para o relatório do dia não sair sem a seção de nomes monitorados."""
     f = ROOT / "monitorados.txt"
     if not f.exists():
         return []
@@ -95,21 +124,21 @@ MODEL = os.getenv("RAG_MODEL", "claude-opus-4-8").strip()
 # Vazio -> usa o MODEL (Opus). O site (/api/ask) sempre usa o MODEL.
 MONITOR_MODEL = os.getenv("MONITOR_MODEL", "").strip() or MODEL
 
-# Pasta onde ficam os PDFs do DOERJ (a mesma que o seu job salva no OneDrive).
-DOWNLOADS_DIR = Path(
-    os.getenv(
-        "DOERJ_DOWNLOADS_DIR",
-        r"C:\Users\Gsilva11\OneDrive - SEFAZ-RJ\DIRETORIO_AGENTE_DO_A01",
-    )
-)
+# --- Pastas de dados --------------------------------------------------------
+# TODAS relativas ao projeto por padrão, e TODAS sobrescrevíveis pelo .env. Assim
+# o projeto roda em qualquer máquina sem configurar nada (o default cai dentro do
+# próprio diretório), e no servidor cada pasta pode ir para outro disco/share.
+def _pasta(var, padrao):
+    """Pasta vinda do .env; se vazia, `padrao` (relativo à raiz do projeto)."""
+    valor = os.getenv(var, "").strip()
+    return Path(valor) if valor else (ROOT / padrao)
 
-# Pasta onde o job diário salva o Excel das exonerações (no OneDrive).
-EXONERACOES_DIR = Path(
-    os.getenv(
-        "DOERJ_EXONERACOES_DIR",
-        r"C:\Users\Gsilva11\OneDrive - SEFAZ-RJ\Exonerações",
-    )
-)
+
+# Pasta onde ficam os PDFs do DOERJ — de onde o MinerU lê e onde o download grava.
+DOWNLOADS_DIR = _pasta("DOERJ_DOWNLOADS_DIR", "downloads")
+
+# Pasta onde o job diário salva o Excel das exonerações.
+EXONERACOES_DIR = _pasta("DOERJ_EXONERACOES_DIR", "exoneracoes")
 
 # --- Download do D.O. (Playwright dirige o portal do IOERJ) ------------------
 # O portal não expõe URL estável do PDF; dirigimos um navegador pelo fluxo
@@ -137,15 +166,23 @@ CADERNO_PARTE_I = "Parte I (Poder Executivo)"
 DOWNLOAD_HEADLESS = os.getenv("DOWNLOAD_HEADLESS", "true").strip().lower() in {"1", "true", "yes", "sim"}
 DOWNLOAD_TZ = os.getenv("DOWNLOAD_TZ", "America/Sao_Paulo").strip()  # fuso da data da edição
 NAV_TIMEOUT_MS = int(os.getenv("NAV_TIMEOUT_MS", "60000"))          # timeout de navegação
-SCREENSHOT_DIR = ROOT / "screenshots"                               # prints de falha do download
+SCREENSHOT_DIR = _pasta("DOERJ_SCREENSHOT_DIR", "screenshots")      # prints de falha do download
 
 # Pasta onde o MinerU grava o resultado da extração (Markdown + content_list.json).
-SAIDA_DIR = ROOT / "saida"
+# Cresce ~6 MB por edição; ver limpar.py (retenção).
+SAIDA_DIR = _pasta("DOERJ_SAIDA_DIR", "saida")
 
 # Índice de busca por TEXTO. Usamos SQLite com a extensão FTS5 (full-text search),
 # que já vem embutida no Python — não precisa instalar banco de dados nenhum.
-INDEX_DIR = ROOT / "data" / "index"
+INDEX_DIR = _pasta("DOERJ_INDEX_DIR", "data/index")
 DB_PATH = INDEX_DIR / "doerj_fts.db"     # o arquivo do índice (gerado pelo index_build)
+
+# Relatórios do monitor estruturado (monitoramento_AAAA-MM-DD.xlsx).
+RELATORIOS_DIR = _pasta("DOERJ_RELATORIOS_DIR", "relatorios")
+
+# Dias que a saída do MinerU fica em disco antes de ser apagada por limpar.py.
+# O texto já vive no índice FTS5; saida/ só serve para reindexar. 0 = nunca apaga.
+RETENCAO_DIAS = int(os.getenv("DOERJ_RETENCAO_DIAS", "30"))
 
 # DPI (resolução) das miniaturas de página renderizadas no front-end. Maior =
 # imagem mais nítida, porém mais pesada.

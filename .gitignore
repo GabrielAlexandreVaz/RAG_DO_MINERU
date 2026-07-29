@@ -11,6 +11,13 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
+# --- Runtime instalado por deploy\instalar.bat (pesado, reinstalável) ---
+# modelos do MinerU (~413 MB) e navegador do Playwright: ficam dentro do projeto
+# para o job não depender do perfil do usuário do Windows (ver config.py).
+modelos/
+navegadores/
+mineru.json
+
 # --- Dados gerados pelo pipeline (não versionar) ---
 # PDFs baixados do D.O.
 downloads/
@@ -22,6 +29,9 @@ data/
 logs/
 # prints de falha do download
 screenshots/
+# Excel do monitor estruturado e das exonerações
+relatorios/
+exoneracoes/
 
 # --- Arquivos avulsos de teste ---
 _pag3.png

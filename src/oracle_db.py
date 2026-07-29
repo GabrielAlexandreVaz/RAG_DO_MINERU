@@ -135,6 +135,105 @@ def _tabela_monitor():
     return _qualificar(nome)
 
 
+def _tabela_filtro():
+    """Nome qualificado+aspas da tabela 002B (pré-filtro do monitor)."""
+    nome = config.oracle_settings().get("table_filtro")
+    if not nome:
+        raise RuntimeError("ORACLE_TABLE_FILTRO nao configurado no .env (tabela 002B).")
+    return _qualificar(nome)
+
+
+def listar_palavras_filtro(edicao_iso=None):
+    """Palavras do PRÉ-FILTRO do monitor (002B) VIGENTES na data da edição.
+
+    São os termos que decidem quais páginas vão para a IA no monitor estruturado
+    ('fazenda', 'sefaz', 'ponto facultativo'...). Incluir um termo = mais páginas
+    lidas (mais recall, mais custo); retirar = menos páginas. Devolve a lista de
+    strings na ordem do ID."""
+    ref = _to_date(edicao_iso) or datetime.date.today()
+    con = get_connection()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            f"SELECT PALAVRA_CHAVE FROM {_tabela_filtro()} "
+            "WHERE PALAVRA_CHAVE IS NOT NULL "
+            "  AND (DATA_INI IS NULL OR DATA_INI <= :ed) "
+            "  AND (DATA_FIM IS NULL OR DATA_FIM >= :ed) "
+            "ORDER BY ID",
+            {"ed": ref},
+        )
+        return [(p or "").strip() for (p,) in cur.fetchall() if (p or "").strip()]
+    finally:
+        con.close()
+
+
+def _tabela_monitorados():
+    """Nome qualificado+aspas da tabela 002N (nomes monitorados). Erro se não configurada."""
+    nome = config.oracle_settings().get("table_monitorados")
+    if not nome:
+        raise RuntimeError("ORACLE_TABLE_MONITORADOS nao configurado no .env (tabela 002N).")
+    return _qualificar(nome)
+
+
+def _tabela_palavras():
+    """Nome qualificado+aspas da tabela 001B (palavras-chave). Erro se não configurada."""
+    nome = config.oracle_settings().get("table_palavras")
+    if not nome:
+        raise RuntimeError("ORACLE_TABLE_PALAVRAS nao configurado no .env (tabela 001B).")
+    return _qualificar(nome)
+
+
+def listar_palavras_chave(edicao_iso=None):
+    """Palavras-chave dos atos de pessoal (001B) VIGENTES na data da edição.
+
+    Mesma ideia da 002N: para procurar um novo tipo de ato no D.O., basta um
+    INSERT ('designar', 'aposentar'...); para parar, um UPDATE preenchendo
+    DATA_FIM. Devolve a lista de strings na ordem do ID."""
+    ref = _to_date(edicao_iso) or datetime.date.today()
+    con = get_connection()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            f"SELECT PALAVRA_CHAVE FROM {_tabela_palavras()} "
+            "WHERE PALAVRA_CHAVE IS NOT NULL "
+            "  AND (DATA_INI IS NULL OR DATA_INI <= :ed) "
+            "  AND (DATA_FIM IS NULL OR DATA_FIM >= :ed) "
+            "ORDER BY ID",
+            {"ed": ref},
+        )
+        return [(p or "").strip() for (p,) in cur.fetchall() if (p or "").strip()]
+    finally:
+        con.close()
+
+
+def listar_monitorados(edicao_iso=None):
+    """Lê a lista de pessoas monitoradas da tabela 002N, VIGENTES na data da edição.
+
+    Esta é a fonte da verdade dos nomes: para incluir alguém, basta um INSERT na
+    tabela; para retirar, um UPDATE preenchendo DATA_FIM (não precisa apagar a
+    linha — assim o histórico fica preservado e reprocessar uma edição antiga
+    continua usando a lista que valia NAQUELE dia).
+
+    Vigente na edição D = (DATA_INI nula ou <= D) E (DATA_FIM nula ou >= D).
+    Devolve [{"nome": ..., "funcao": ...}] na ordem do ID."""
+    ref = _to_date(edicao_iso) or datetime.date.today()
+    con = get_connection()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            f"SELECT NOME, FUNCAO FROM {_tabela_monitorados()} "
+            "WHERE NOME IS NOT NULL "
+            "  AND (DATA_INI IS NULL OR DATA_INI <= :ed) "
+            "  AND (DATA_FIM IS NULL OR DATA_FIM >= :ed) "
+            "ORDER BY ID",
+            {"ed": ref},
+        )
+        return [{"nome": (n or "").strip(), "funcao": (f or "").strip()}
+                for n, f in cur.fetchall() if (n or "").strip()]
+    finally:
+        con.close()
+
+
 def ja_gravado(resposta, edicao_iso):
     """True se JÁ existem linhas desta edição + tema na tabela.
 

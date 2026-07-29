@@ -70,20 +70,26 @@ Job externo baixa o PDF do dia (~08:00)  ->  C:\...\OneDrive - SEFAZ-RJ\DIRETORI
 
 ---
 
-## 4. As duas tarefas agendadas (Windows)
+## 4. A tarefa agendada (Windows)
 
 | Tarefa | Quando | O que faz |
 |---|---|---|
-| `DOERJ_MinerU_atualizar` | Todo dia **08:05** | Extrai (MinerU) e indexa a edição do dia — mantém o site atualizado |
-| `DOERJ_Exoneracoes` | **Seg–Sex 08:30** | Gera `exoneracoes_AAAA-MM-DD.xlsx` na pasta `...\OneDrive - SEFAZ-RJ\Exonerações` |
+| `DOERJ_Pipeline` | **Seg–Sex**, 08:05, repetindo a cada 60 min por 10 h | Roda o `run_pipeline.bat`: baixa o D.O., extrai com o MinerU, indexa, gera os Excel e grava no Oracle (001A e 002A) |
 
-Rodam **com o usuário logado** (padrão do Windows). Gerenciar:
+Repete de hora em hora porque o D.O. não tem hora fixa — pode sair às 08:00 ou às 10:00. Cada etapa
+tem trava de idempotência, então as execuções seguintes do mesmo dia saem de graça (não re-chamam a
+IA sobre uma edição já processada).
+
+As tarefas antigas `DOERJ_MinerU_atualizar` e `DOERJ_Exoneracoes` foram substituídas por esta e
+estão desabilitadas.
+
 ```
-schtasks /Run    /TN "DOERJ_Exoneracoes"     # rodar agora (teste)
-schtasks /Query  /TN "DOERJ_Exoneracoes"     # ver status / próxima execução
-schtasks /Delete /TN "DOERJ_Exoneracoes" /F  # remover
+schtasks /Run    /TN "DOERJ_Pipeline"     # rodar agora (teste)
+schtasks /Query  /TN "DOERJ_Pipeline" /V  # status / próxima execução
 ```
-Logs: `logs\atualizar.log` e `logs\exoneracoes.log`.
+Log: `logs\pipeline.log` (rotacionado pelo `src/limpar.py` ao passar de 5 MB).
+
+Para criar a tarefa num servidor novo: `deploy\instalar_tarefa.bat` — ver [IMPLANTACAO.md](IMPLANTACAO.md).
 
 ---
 
@@ -126,10 +132,12 @@ Logs: `logs\atualizar.log` e `logs\exoneracoes.log`.
 
 ## 7. Requisitos para funcionar no dia a dia
 
-- **Máquina ligada e usuário logado** nos horários dos jobs (08:05 e 08:30).
-- **`ANTHROPIC_API_KEY`** válida no `.env` (a IA é chamada: ~1 vez/dia no job + a cada pergunta no site).
-  Custo pequeno.
-- O **job externo** que baixa o PDF do dia às ~08:00 precisa continuar funcionando.
+- **Máquina ligada** nos horários do job (08:05 às 18:05, seg-sex). Num servidor a tarefa roda com o
+  usuário deslogado; ver [IMPLANTACAO.md](IMPLANTACAO.md).
+- **`ANTHROPIC_API_KEY`** válida no `.env` (a IA é chamada ~3 vezes por edição). Custo pequeno.
+- Acesso ao **portal do IOERJ** (o próprio pipeline baixa o D.O. com o Playwright) e ao **Oracle**.
+- As tabelas de configuração no Oracle (**001B**, **002B**, **002N**) precisam ter linha vigente; se
+  o banco não responder, o job usa as listas de reserva do código e avisa no log.
 
 ---
 

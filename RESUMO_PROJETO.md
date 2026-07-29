@@ -79,7 +79,6 @@ Site (Flask, http://127.0.0.1:5001), à parte: busca BM25 -> Claude -> tabela + 
 | `deploy/verificar.py` | Diagnóstico: confere 12 itens antes de agendar |
 | `deploy/instalar_tarefa.bat` | Cria a tarefa agendada no servidor |
 | `deploy/schema.sql`, `deploy/seed_config.sql` | Recriar as 5 tabelas noutro banco |
-| `atualizar_dia.bat` | Legado: extrai + indexa a edição do dia (tarefa desativada) |
 | `web.bat` | Sobe o site local |
 | `reindex.bat` | Reindexa tudo manualmente |
 | `requirements.txt`, `README.md`, `IMPLANTACAO.md`, `.env` | Dependências, guias e configurações/chave |

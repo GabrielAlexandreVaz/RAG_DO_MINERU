@@ -27,6 +27,8 @@ _resultados = []
 def checar(nome, essencial=True):
     """Decorador: roda a função, captura a exceção e registra o resultado."""
     def wrap(fn):
+        """Executa a checagem, guarda o resultado e NUNCA propaga a exceção -
+        assim uma falha não impede as verificações seguintes."""
         try:
             detalhe = fn()
             _resultados.append((OK, nome, detalhe or ""))
@@ -40,6 +42,7 @@ def checar(nome, essencial=True):
 # --- 1. Interpretador ------------------------------------------------------
 @checar("Python do venv")
 def _python():
+    """Versão do interpretador e se estamos mesmo dentro do .venv do projeto."""
     v = sys.version_info
     if v < (3, 10):
         raise RuntimeError(f"Python {v.major}.{v.minor} - o projeto pede 3.10+")
@@ -51,6 +54,9 @@ def _python():
 # --- 2. truststore (proxy com inspeção TLS) --------------------------------
 @checar("truststore ativo (sitecustomize)")
 def _truststore():
+    """O sitecustomize.py existe E o truststore trocou a classe padrão de SSL.
+
+    Verificar só o arquivo não bastaria: ele pode existir sem ter efeito."""
     import ssl
     import truststore
     site = Path(truststore.__file__).parent.parent / "sitecustomize.py"
@@ -65,6 +71,7 @@ def _truststore():
 
 @checar("HTTPS ate o portal do IOERJ")
 def _https():
+    """Prova prática do TLS: um GET no portal do IOERJ atravessando o proxy."""
     import urllib.request
     import config
     with urllib.request.urlopen(config.PORTAL_URL, timeout=30) as r:
@@ -74,6 +81,7 @@ def _https():
 # --- 3. Dependências -------------------------------------------------------
 @checar("Bibliotecas importaveis")
 def _libs():
+    """Todas as bibliotecas do projeto importam. Lista as que faltam pelo nome do pip."""
     import importlib
     faltando = []
     for mod, pip in [("anthropic", "anthropic"), ("oracledb", "oracledb"),
@@ -91,6 +99,7 @@ def _libs():
 
 @checar("Chromium do Playwright")
 def _chromium():
+    """O navegador do Playwright está instalado e o executável existe no disco."""
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         exe = Path(pw.chromium.executable_path)
@@ -101,6 +110,10 @@ def _chromium():
 
 @checar("Modelos do MinerU")
 def _mineru():
+    """O mineru.json existe e o models-dir dele aponta para uma pasta que existe.
+
+    É a falha mais comum numa máquina nova: a config aparece, mas os modelos
+    ficaram noutro perfil de usuário."""
     import json
     cfg = Path(os.getenv("MINERU_TOOLS_CONFIG_JSON", Path.home() / "mineru.json"))
     if not cfg.exists():
@@ -115,6 +128,7 @@ def _mineru():
 
 @checar("Executavel do MinerU")
 def _mineru_bin():
+    """O mineru.exe do venv (e não um global) é encontrável pelo extrair.py."""
     import extrair
     b = extrair._mineru_bin()
     if b == "mineru" and not Path(sys.prefix, "Scripts", "mineru.exe").exists():
@@ -125,6 +139,7 @@ def _mineru_bin():
 # --- 4. Configuração e pastas ---------------------------------------------
 @checar("Variaveis do .env")
 def _env():
+    """O .env existe e tem as variáveis sem as quais o job não roda."""
     import config
     if not (ROOT / ".env").exists():
         raise RuntimeError(".env nao existe - copie o .env.example e preencha")
@@ -137,6 +152,9 @@ def _env():
 
 @checar("Pastas de dados (existem e aceitam escrita)")
 def _pastas():
+    """Cada pasta de dados existe (cria se faltar) e aceita escrita de verdade.
+
+    Testa gravando um arquivo: permissão de share só aparece na hora de escrever."""
     import config
     problemas = []
     for nome in ("DOWNLOADS_DIR", "SAIDA_DIR", "INDEX_DIR",
@@ -157,6 +175,10 @@ def _pastas():
 # --- 5. Oracle -------------------------------------------------------------
 @checar("Oracle: conexao e tabelas")
 def _oracle():
+    """Conecta no Oracle e conta as linhas das 5 tabelas.
+
+    Um SELECT COUNT prova de uma vez a conexão, o nome qualificado e a permissão
+    de leitura - os três pontos onde a configuração costuma errar."""
     import oracle_db
     if not oracle_db.configurado():
         raise RuntimeError("ORACLE_USER/PASSWORD/DSN nao preenchidos no .env")
@@ -183,6 +205,10 @@ def _oracle():
 
 @checar("Oracle: tabelas de configuracao populadas")
 def _config_oracle():
+    """As 3 tabelas de configuração têm linha VIGENTE hoje.
+
+    Tabela populada mas toda com DATA_FIM no passado faria o job cair
+    silenciosamente para as listas de reserva do código."""
     import oracle_db
     palavras = oracle_db.listar_palavras_chave()
     filtro = oracle_db.listar_palavras_filtro()
@@ -198,6 +224,8 @@ def _config_oracle():
 # --- 6. Índice -------------------------------------------------------------
 @checar("Indice FTS5", essencial=False)
 def _indice():
+    """Quantas edições há no índice FTS5. Não é essencial: numa instalação nova
+    ele ainda não existe e será criado na primeira execução do pipeline."""
     import config
     from search import list_dates
     if not config.DB_PATH.exists():
@@ -208,6 +236,9 @@ def _indice():
 
 
 def main():
+    """Imprime o relatório alinhado e devolve 1 se algo ESSENCIAL falhou.
+
+    O código de saída é o que permite ao instalar.bat parar antes de agendar."""
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:  # noqa: BLE001

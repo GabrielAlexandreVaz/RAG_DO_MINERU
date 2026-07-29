@@ -23,6 +23,10 @@ import index_build
 
 
 def ler():
+    """Passo 3/5: baixa em memória as Partes IB/II/IV/V e indexa o texto.
+
+    Sem Playwright instalado, avisa e sai SEM erro — a Parte I e as demais etapas
+    continuam funcionando; perder os cadernos leves não justifica parar o job."""
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:

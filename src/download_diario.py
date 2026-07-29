@@ -44,10 +44,16 @@ _PDF_URL_RE = re.compile(r"mostra_pdf\.php", re.IGNORECASE)
 
 # ------------------------------------------------------------ helpers de data/PDF
 def _now():
+    """Agora no fuso do D.O. (America/Sao_Paulo), e não no fuso da máquina.
+
+    Importa em servidor configurado em UTC: perto da meia-noite, a data local
+    seria a do dia seguinte e o PDF sairia com o nome errado."""
     return datetime.now(ZoneInfo(config.DOWNLOAD_TZ))
 
 
 def _hoje_iso():
+    """Data de hoje (AAAA-MM-DD) no fuso do D.O. Usada só como último recurso,
+    quando não dá para ler a data da edição no próprio portal."""
     return _now().strftime("%Y-%m-%d")
 
 
@@ -73,11 +79,17 @@ def _looks_like_pdf(data):
 
 
 def _is_pdf_response(url, content_type):
+    """True se esta resposta da rede parece ser o PDF do Diário.
+
+    Aceita por dois caminhos — a URL casar com mostra_pdf.php OU o content-type
+    ser application/pdf — porque o portal nem sempre manda o cabeçalho certo."""
     ct = (content_type or "").lower()
     return bool(_PDF_URL_RE.search(url)) or "application/pdf" in ct
 
 
 def _log(msg):
+    """Log com o prefixo [download]. flush=True para a linha aparecer na hora no
+    logs\\pipeline.log, e não só quando o buffer encher."""
     print(f"[download] {msg}", flush=True)
 
 
@@ -112,6 +124,13 @@ def download_diario(download_dir=None):
         context.set_default_navigation_timeout(config.NAV_TIMEOUT_MS)
 
         def on_response(response):
+            """Guarda em `captures` toda resposta que for realmente um PDF.
+
+            É o coração da estratégia: em vez de adivinhar a URL do arquivo (que
+            depende de sessão e token efêmeros), escutamos a rede e pegamos o PDF
+            que o próprio visualizador baixou. Erros são ignorados porque este
+            handler roda para CADA resposta da página — uma falha aqui não pode
+            interromper a navegação."""
             try:
                 url = response.url
                 if not _is_pdf_response(url, response.headers.get("content-type")) or not response.ok:
@@ -176,6 +195,13 @@ def _parse_edition_date_from_url(url):
 
 # ---------------------------------------------------------------- navegação
 def _goto_cadernos(page):
+    """Navega do portal até a página que lista os cadernos da última edição.
+
+    O caminho tem três formas de dar certo, tentadas em ordem, porque o portal
+    muda de comportamento: clicar no botão "ÚLTIMA EDIÇÃO"; se ele não existir,
+    ir direto na URL de fallback; e se o redirecionamento automático não
+    acontecer, clicar no link "clique aqui". Levanta RuntimeError se nenhuma
+    funcionar."""
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     _log(f"acessando portal: {config.PORTAL_URL}")
     page.goto(config.PORTAL_URL, wait_until="domcontentloaded")
@@ -200,6 +226,10 @@ def _goto_cadernos(page):
 
 
 def _selecionar_caderno(context, page):
+    """Abre o caderno alvo (Parte I) e devolve a aba onde o visualizador carregou.
+
+    O link pode abrir numa aba nova ou navegar na mesma — daí o expect_page com
+    timeout curto: se nenhuma aba surgir em 8s, é porque navegou aqui mesmo."""
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     pattern = re.compile(re.escape(config.CADERNO_ALVO), re.IGNORECASE)
     link = page.locator("a", has_text=pattern).first
@@ -235,6 +265,14 @@ def _obter_pdf(viewer, captures, target):
 
 
 def _wait_for_capture(viewer, captures, timeout_ms):
+    """Espera o PDF aparecer na lista de respostas interceptadas da rede.
+
+    `captures` é preenchida pelo handler on_response enquanto o visualizador
+    carrega. Quando há mais de uma captura, fica com a MAIOR: o pdf.js costuma
+    pedir pedaços do arquivo, e o corpo maior é a edição inteira.
+
+    O wait_for_timeout serve para dar vez aos eventos do Playwright — sem ele o
+    laço giraria sem nunca receber as respostas."""
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
         if captures:
@@ -244,6 +282,12 @@ def _wait_for_capture(viewer, captures, timeout_ms):
 
 
 def _tentar_botao_download(page, target):
+    """Plano B: aciona o botão de download do visualizador e salva em `target`.
+
+    Só é usado quando a interceptação de rede não pegou nada. Varre uma lista de
+    seletores porque o visualizador não expõe um id estável — cada tentativa que
+    falha é ignorada e passa para a próxima. Devolve a URL do download, ou None
+    se nenhum seletor funcionou."""
     candidates = [
         "a[download]", "#download", "button#download",
         '[title*="ownload" i]', '[aria-label*="ownload" i]',
@@ -267,6 +311,11 @@ def _tentar_botao_download(page, target):
 
 # ----------------------------------------------------------------- helpers
 def _click_by_text(page, pattern):
+    """Clica no primeiro elemento cujo TEXTO casa com `pattern`. True se clicou.
+
+    Tenta quatro formas de localizar (link, botão, âncora, texto solto) porque o
+    portal não marca os elementos de forma consistente — o mesmo "ÚLTIMA EDIÇÃO"
+    já apareceu como link e como botão."""
     locators = [
         page.get_by_role("link", name=pattern),
         page.get_by_role("button", name=pattern),
@@ -285,6 +334,10 @@ def _click_by_text(page, pattern):
 
 
 def _click_anchor_href(page, href_re):
+    """Clica no primeiro link cujo HREF casa com `href_re`. True se clicou.
+
+    Complementa o _click_by_text: às vezes o link certo não tem texto previsível,
+    mas o endereço sim (ex.: do_seleciona_edicao.php)."""
     links = page.locator("a[href]")
     for i in range(links.count()):
         href = links.nth(i).get_attribute("href") or ""
@@ -298,6 +351,11 @@ def _click_anchor_href(page, href_re):
 
 
 def _screenshot(page, tag):
+    """Salva um print da página em SCREENSHOT_DIR para diagnosticar uma falha.
+
+    O download roda headless num job agendado: quando o portal muda de layout, o
+    print é a única forma de ver o que apareceu na tela. Engole qualquer exceção
+    de propósito — falhar ao registrar um erro não pode virar um segundo erro."""
     if page is None:
         return
     try:
@@ -375,6 +433,8 @@ def baixar_cadernos(estrategias=("leve",), pular=None):
         context.set_default_navigation_timeout(config.NAV_TIMEOUT_MS)
 
         def on_response(response):
+            """Idem ao handler do download da Parte I, mas sem log: aqui passam
+            vários cadernos na mesma sessão e a linha por captura poluiria o log."""
             try:
                 if not _is_pdf_response(response.url, response.headers.get("content-type")) or not response.ok:
                     return
@@ -425,6 +485,11 @@ def baixar_cadernos(estrategias=("leve",), pular=None):
 
 
 def main():
+    """Linha de comando: baixa a última edição e informa o resultado.
+
+    Ponto de entrada do passo 1/5 do pipeline. Uma exceção aqui vira código de
+    saída 1, que o run_pipeline registra como aviso e segue — o PDF pode já estar
+    baixado de uma execução anterior."""
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:

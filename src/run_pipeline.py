@@ -55,6 +55,12 @@ def _run(desc, cmd):
 
 
 def main():
+    """Roda as 5 etapas em sequência, cada uma num subprocesso próprio.
+
+    Subprocesso em vez de import para isolar falhas: cada etapa tem seu código de
+    saída, e um travamento do MinerU não leva junto o restante. Download e
+    limpeza são as exceções que NÃO derrubam o pipeline — as demais param no
+    primeiro erro, porque cada uma depende da anterior."""
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:

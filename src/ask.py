@@ -27,6 +27,10 @@ from search import list_dates, parse_date_from_query, search
 
 
 def main():
+    """Linha de comando: pergunta -> busca -> resposta da IA no terminal.
+
+    Mesma cadeia do site (search -> reader), sem servidor: útil para testar uma
+    pergunta rápido ou usar dentro de um script."""
     # --- Define os argumentos aceitos na linha de comando --------------------
     ap = argparse.ArgumentParser(description="Pergunta ao DOERJ (busca por texto + leitura pela IA).")
     ap.add_argument("question", nargs="+", help="A pergunta")          # 1+ palavras

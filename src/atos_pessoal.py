@@ -194,6 +194,11 @@ def gerar(info, date=None, max_tokens=16000, force=False):
 
 
 def main():
+    """Linha de comando do passo 4/5: grava os atos de pessoal da edição na 001A.
+
+    Resolve a edição ANTES de carregar os temas, porque as palavras-chave da 001B
+    valem por vigência na data da edição. Sai sem erro (e sem gravar) quando o
+    Oracle não está configurado, para não derrubar o pipeline agendado."""
     try:
         sys.stdout.reconfigure(encoding="utf-8")     # acentos no log do Windows
     except Exception:

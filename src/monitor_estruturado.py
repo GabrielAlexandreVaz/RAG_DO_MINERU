@@ -226,6 +226,10 @@ def _compilar_kw(kws):
 
 
 def _pagina_relevante(content, rx):
+    """True se o texto da página casa com algum termo do pré-filtro (`rx` de _compilar_kw).
+
+    Sem regex compilado (lista vazia), devolve False — melhor não mandar nada para
+    a IA do que mandar a edição inteira por engano."""
     return bool(rx.search(_norm(content))) if rx else False
 
 
@@ -244,6 +248,11 @@ def _paginas_relevantes(caderno, date, rx):
 
 
 def _cadernos_da_edicao(date):
+    """Nomes dos cadernos já indexados nesta edição (Parte I, IB, II, IV, V).
+
+    Vem do índice, e não de config.CADERNOS, para o monitor processar só o que
+    de fato foi lido — se um caderno falhou no download, ele simplesmente não
+    aparece aqui."""
     con = sqlite3.connect(config.DB_PATH)
     try:
         rows = con.execute(
@@ -372,6 +381,12 @@ def _scan_monitorados(date):
 
 
 def _extrair_json(resp):
+    """Extrai o objeto JSON da resposta da IA, tolerando o que ela costuma acrescentar.
+
+    O prompt pede JSON puro, mas o modelo às vezes embrulha em ```json ... ``` ou
+    escreve uma frase antes/depois. Aqui tiramos a cerca de crase e cortamos do
+    primeiro '{' até o último '}'. Levanta a exceção do json.loads se ainda assim
+    não for JSON válido — quem chama trata isso como bloco sem itens."""
     text = "".join(b.text for b in resp.content if b.type == "text").strip()
     if text.startswith("```"):
         text = text.strip("`")
@@ -429,6 +444,23 @@ def _mapear_bloco(caderno, paginas, client, max_tokens=8000):
 
 
 def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
+    """Monta o monitoramento de UMA edição: Excel com 8 abas + gravação na 002A.
+
+    O caminho completo, na ordem:
+      1. trava de custo — se o Excel canônico do dia já existe e não veio --force,
+         sai antes de chamar a IA (o job roda de hora em hora);
+      2. para cada caderno indexado, seleciona as páginas pelo pré-filtro da 002B
+         (ou todas, com `todas_paginas`) e manda em blocos de `chunk` páginas à IA;
+      3. normaliza a categoria de cada item devolvido (o modelo erra a grafia);
+      4. DESCARTA o que a IA marcou como NOMES_MONITORADOS e põe no lugar a
+         varredura determinística da 002N — nomes não dependem do modelo;
+      5. grava o .xlsx e, só se a rodada foi completa, a tabela 002A.
+
+    Rodada PARCIAL (algum bloco falhou na IA após 5 tentativas) sai como
+    *_PARCIAL.xlsx e NÃO grava no Oracle: melhor não ter o dado do que ter o dado
+    pela metade, que passaria despercebido.
+
+    `date` vazio = edição mais recente do índice. Devolve o caminho do Excel."""
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
@@ -534,6 +566,15 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
 
 
 def _build_xlsx(arquivo, date, itens, blocos_total=None, blocos_falha=0):
+    """Escreve o .xlsx: uma aba "Resumo" + uma aba por seção do relatório.
+
+    Os itens são distribuídos pelas 8 seções por CATEGORIA_SECAO (duas categorias
+    caem na mesma seção 4). Seção sem item recebe uma linha dizendo isso, para o
+    leitor distinguir "não houve" de "falhou".
+
+    O aviso de completude no topo do Resumo é o ponto-chave: em vermelho quando
+    `blocos_falha` > 0, verde quando a rodada leu tudo. Sem isso, um relatório
+    incompleto passaria por completo."""
     import xlsxwriter
     wb = xlsxwriter.Workbook(str(arquivo))
     f_hdr = wb.add_format({"bold": True, "bg_color": "#0052cc", "font_color": "white",
@@ -583,6 +624,7 @@ def _build_xlsx(arquivo, date, itens, blocos_total=None, blocos_falha=0):
 
 
 def main():
+    """Linha de comando: lê os argumentos e chama gerar(). Ponto de entrada do passo 5/5."""
     ap = argparse.ArgumentParser(description="Gera o Monitoramento DOERJ estruturado em Excel.")
     ap.add_argument("--date", default=None, help="Edicao AAAA-MM-DD (padrao: a mais recente)")
     ap.add_argument("--dir", default=None, help="Pasta de destino (padrao: <projeto>/relatorios)")

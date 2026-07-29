@@ -139,7 +139,7 @@ def _env():
 def _pastas():
     import config
     problemas = []
-    for nome in ("DOWNLOADS_DIR", "EXONERACOES_DIR", "SAIDA_DIR", "INDEX_DIR",
+    for nome in ("DOWNLOADS_DIR", "SAIDA_DIR", "INDEX_DIR",
                  "RELATORIOS_DIR", "SCREENSHOT_DIR"):
         p = getattr(config, nome)
         try:
@@ -151,7 +151,7 @@ def _pastas():
             problemas.append(f"{nome}={p} ({type(e).__name__})")
     if problemas:
         raise RuntimeError("sem escrita em: " + "; ".join(problemas))
-    return f"6 pastas ok (downloads={config.DOWNLOADS_DIR})"
+    return f"5 pastas ok (downloads={config.DOWNLOADS_DIR})"
 
 
 # --- 5. Oracle -------------------------------------------------------------

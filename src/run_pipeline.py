@@ -12,10 +12,14 @@ Etapas:
      pode já estar baixado de uma execução anterior e faltar só gravar no Oracle.
   2) MinerU + indice -> index_build.py --latest (idempotente: pula se ja indexou).
   3) Cadernos leves IB/II/IV/V -> ler_cadernos.py (indexa sem salvar PDF).
-  4) Exoneracoes -> Excel  -> exonerar.py      (pula se o .xlsx do dia ja existe).
-  5) Atos de pessoal -> Oracle 001A -> atos_pessoal.py (pula se ja gravado).
-  6) Monitor 8 temas -> Excel + Oracle 002A -> monitor_estruturado.py.
+  4) Atos de pessoal -> Oracle 001A -> atos_pessoal.py (pula se ja gravado).
+  5) Monitor 8 temas -> Excel + Oracle 002A -> monitor_estruturado.py.
   +) Limpeza (retenção de disco) -> limpar.py. Também não derruba o pipeline.
+
+O Excel diário das exonerações saiu do pipeline: as exonerações já vão para a
+tabela 001A no passo 4 (RESPOSTA='Exoneração'), então gerá-lo era ler as mesmas
+páginas uma segunda vez com o Opus (~72 mil tokens/dia) para produzir a mesma
+informação noutro formato.
 
 POR QUE ISTO EXISTE (e roda de hora em hora): o D.O. nao tem hora fixa — pode
 sair as 08:00 ou as 10:00. Um job que roda 1x as 08:05 perde a edicao quando ela
@@ -77,32 +81,29 @@ def main():
     #    execucao anterior (o job roda de hora em hora) e faltar so a gravacao no
     #    Oracle. Se nao houver nada para ler, o passo 1 falha com mensagem propria.
     if args.download:
-        print("\n===== 1/6 Download do D.O. (Playwright) =====", flush=True)
+        print("\n===== 1/5 Download do D.O. (Playwright) =====", flush=True)
         if subprocess.run([str(rag_py), str(src / "download_diario.py")]).returncode != 0:
             print("[ATENCAO] o download falhou; seguindo com o que ja estiver baixado.",
                   flush=True)
 
     # 1) MinerU + indice da Parte I (edicao mais recente). Idempotente e barato.
-    _run("2/6 MinerU + indice Parte I (index_build --latest)",
+    _run("2/5 MinerU + indice Parte I (index_build --latest)",
          [rag_py, src / "index_build.py", "--latest"])
 
     # 2) Cadernos leves (IB/II/IV/V): le em memoria e indexa (sem salvar PDF).
     #    So roda se o Playwright estiver instalado; senao, avisa e segue.
     if args.skip_cadernos:
-        print("[skip] passo 3/6 (cadernos leves) pulado por --skip-cadernos.", flush=True)
+        print("[skip] passo 3/5 (cadernos leves) pulado por --skip-cadernos.", flush=True)
     else:
-        _run("3/6 Cadernos leves IB/II/IV/V (ler_cadernos)", [rag_py, src / "ler_cadernos.py"])
+        _run("3/5 Cadernos leves IB/II/IV/V (ler_cadernos)", [rag_py, src / "ler_cadernos.py"])
 
-    # 3) Exoneracoes -> Excel (EXONERACOES_DIR).
-    _run("4/6 Exoneracoes -> Excel", [rag_py, src / "exonerar.py"] + forca)
-
-    # 4) Atos de pessoal -> Oracle (tabela 001A).
-    _run("5/6 Atos de pessoal -> Oracle (001A)",
+    # 3) Atos de pessoal -> Oracle (tabela 001A).
+    _run("4/5 Atos de pessoal -> Oracle (001A)",
          [rag_py, src / "atos_pessoal.py", "--tema", args.tema] + forca)
 
-    # 5) Monitor estruturado (8 temas) -> Excel + Oracle (002A). Usa o MONITOR_MODEL
+    # 4) Monitor estruturado (8 temas) -> Excel + Oracle (002A). Usa o MONITOR_MODEL
     #    (Haiku, mais barato). Idempotente: pula se o Excel canonico do dia ja existe.
-    _run("6/6 Monitor 8 temas -> Excel + Oracle (002A)",
+    _run("5/5 Monitor 8 temas -> Excel + Oracle (002A)",
          [rag_py, src / "monitor_estruturado.py"] + forca)
 
     # 6) Retencao de disco. NAO usa _run: falha de limpeza nao pode marcar como

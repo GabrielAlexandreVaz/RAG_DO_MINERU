@@ -51,8 +51,7 @@ Mínimo a preencher: `ANTHROPIC_API_KEY`, `AZURE_FOUNDRY_ENDPOINT` (se usar Foun
 `MONITOR_MODEL`, `ORACLE_USER`, `ORACLE_PASSWORD`, `ORACLE_DSN`, `ORACLE_SCHEMA`.
 
 As pastas podem ficar **em branco** — cada uma cai numa subpasta do projeto. Preencha só se quiser
-apontar para outro disco. Atenção ao `DOERJ_EXONERACOES_DIR`: é onde cai o Excel diário das
-exonerações, então precisa ser um lugar que quem consome enxergue.
+apontar para outro disco ou share.
 
 ### 4. Conferir antes de agendar
 

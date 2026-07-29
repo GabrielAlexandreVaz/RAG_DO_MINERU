@@ -8,7 +8,8 @@ transforma o PDF em **texto limpo e pesquisável**, e permite:
 - **Consultar por IA** (site local): perguntas em linguagem natural → resposta **estruturada**
   (tabela de atos) com citação de data e página, e **destaque** do trecho na imagem da página.
 - **Baixar** a resposta em **Excel, JSON ou PDF**.
-- **Job automático** que extrai as **exonerações do dia** e salva um Excel numa pasta do OneDrive.
+- **Job automático** que extrai os **atos de pessoal do dia** (nomeações, exonerações) e grava numa
+  tabela Oracle, além do **monitoramento estruturado** em 8 seções (Excel + Oracle).
 
 Tudo roda **localmente**, em **CPU** (sem GPU), na rede corporativa da SEFAZ.
 
@@ -17,15 +18,22 @@ Tudo roda **localmente**, em **CPU** (sem GPU), na rede corporativa da SEFAZ.
 ## 2. Como funciona (o fluxo)
 
 ```
-Job externo baixa o PDF do dia (~08:00)  ->  C:\...\OneDrive - SEFAZ-RJ\DIRETORIO_AGENTE_DO_A01
+[seg-sex, de hora em hora a partir das 08:05]  run_pipeline.bat
         |
-[08:05] MinerU extrai o texto limpo (em fatias de 30 páginas)  ->  saida/<edição>/txt/*_content_list.json
+   1) baixa o PDF do dia do portal do IOERJ (Playwright)  ->  DOERJ_DOWNLOADS_DIR
         |
-        indexa o texto por página no banco de busca (SQLite FTS5)  ->  data/index/doerj_fts.db
+   2) MinerU extrai o texto limpo da Parte I (em fatias)  ->  saida/<edição>/txt/*_content_list.json
+      e indexa por página no banco de busca (SQLite FTS5) ->  data/index/doerj_fts.db
         |
-        +--> Site (Flask, http://127.0.0.1:5001): busca BM25 -> Claude estrutura a resposta -> tabela + downloads
+   3) Partes IB/II/IV/V lidas em memória (PyMuPDF) e indexadas (sem salvar PDF)
         |
-[08:30 seg-sex] Job das exonerações: busca todas as páginas com "exoner*" -> Claude estrutura -> Excel no OneDrive
+   4) Atos de pessoal: palavras-chave da 001B -> Claude estrutura -> Oracle 001A
+        |
+   5) Monitor 8 temas: pré-filtro da 002B + nomes da 002N -> Claude -> Oracle 002A + Excel
+        |
+   +) Limpeza: apaga saida/ com mais de 30 dias e rotaciona o log
+
+Site (Flask, http://127.0.0.1:5001), à parte: busca BM25 -> Claude -> tabela + downloads
 ```
 
 - **MinerU** = extrai o texto respeitando a ordem de leitura das colunas e as tabelas (o grande
@@ -41,17 +49,23 @@ Job externo baixa o PDF do dia (~08:00)  ->  C:\...\OneDrive - SEFAZ-RJ\DIRETORI
 ### Código (`src/`)
 | Arquivo | Papel |
 |---|---|
-| `config.py` | Configuração central (.env, caminhos, modelo, pasta das exonerações, relê a chave) |
+| `config.py` | Configuração central (.env, caminhos, modelo, relê a chave) |
+| `run_pipeline.py` | **Orquestra** as 5 etapas do job diário, em subprocessos |
+| `download_diario.py` | Baixa o D.O. do portal do IOERJ (Playwright) |
 | `extrair.py` | MinerU: PDF → texto (`content_list.json`), **em fatias** para não estourar a memória |
 | `index_build.py` | Texto do MinerU → índice FTS5 (`--latest`, `--extract`, `--force`) |
+| `ler_cadernos.py` | Partes IB/II/IV/V lidas em memória (PyMuPDF) e indexadas |
 | `search.py` | Busca BM25, datas disponíveis, texto de uma página, `pages_matching` (todas as páginas de um tema) |
 | `reader.py` | Chama o Claude e devolve a resposta **estruturada** (resumo + itens) |
+| `atos_pessoal.py` | **Job**: atos de pessoal → Oracle 001A (palavras-chave da 001B) |
+| `monitor_estruturado.py` | **Job**: monitor 8 seções → Oracle 002A + Excel (002B e 002N) |
+| `oracle_db.py` | Leitura das tabelas de configuração e gravação nas de dados |
+| `limpar.py` | Retenção de disco: apaga `saida/` antiga e rotaciona o log |
 | `export.py` | Gera **Excel / PDF / JSON** (só a tabela, sem cabeçalho de pergunta) |
 | `render.py` | Renderiza a página do PDF em imagem, com **marca-texto** alinhado |
 | `highlight.py` | Prepara os termos a destacar |
 | `app.py` | Servidor web (Flask): `/api/ask`, `/api/export`, `/api/page`, `/api/dates` |
 | `ask.py` | Versão de terminal (perguntar sem abrir o site) |
-| `exonerar.py` | **Job**: extrai as exonerações do dia e salva o Excel |
 
 ### Frontend
 - `web/index.html` — página única (busca, atalhos, resposta estruturada, botões de download,
@@ -60,11 +74,15 @@ Job externo baixa o PDF do dia (~08:00)  ->  C:\...\OneDrive - SEFAZ-RJ\DIRETORI
 ### Automação e apoio
 | Arquivo | Papel |
 |---|---|
-| `atualizar_dia.bat` | Job das **08:05**: extrai + indexa a edição do dia |
-| `atualizar_exoneracoes.bat` | Job das **08:30 (seg-sex)**: indexa (garantia) + gera o Excel das exonerações |
+| `run_pipeline.bat` | **O job**: o que a tarefa `DOERJ_Pipeline` dispara |
+| `deploy/instalar.bat` | Monta o ambiente do zero (venv, truststore, Chromium, modelos) |
+| `deploy/verificar.py` | Diagnóstico: confere 12 itens antes de agendar |
+| `deploy/instalar_tarefa.bat` | Cria a tarefa agendada no servidor |
+| `deploy/schema.sql`, `deploy/seed_config.sql` | Recriar as 5 tabelas noutro banco |
+| `atualizar_dia.bat` | Legado: extrai + indexa a edição do dia (tarefa desativada) |
 | `web.bat` | Sobe o site local |
 | `reindex.bat` | Reindexa tudo manualmente |
-| `requirements.txt`, `README.md`, `.env` | Dependências, guia e configurações/chave |
+| `requirements.txt`, `README.md`, `IMPLANTACAO.md`, `.env` | Dependências, guias e configurações/chave |
 | `data/index/doerj_fts.db` | O índice de busca (gerado) |
 | `saida/` | Saída do MinerU (gerada) |
 
@@ -144,16 +162,21 @@ Para criar a tarefa num servidor novo: `deploy\instalar_tarefa.bat` — ver [IMP
 ## 8. Como operar o sistema       
 
 ```bash
-# Ligar o site
+# Rodar o job completo na mão (sem esperar o horário)
+run_pipeline.bat
+schtasks /Run /TN "DOERJ_Pipeline"
+
+# Diagnóstico quando algo falhar
+deploy\verificar.bat
+type logs\pipeline.log
+
+# Etapas isoladas
+.venv\Scripts\python.exe src\download_diario.py                 # só baixar
+.venv\Scripts\python.exe src\index_build.py --latest            # só indexar
+.venv\Scripts\python.exe src\atos_pessoal.py --tema exonerar    # só um tema no Oracle
+.venv\Scripts\python.exe src\monitor_estruturado.py --force     # refazer o monitor do dia
+
+# Ligar o site (consulta local, fora do pipeline)
 web.bat                      # -> http://127.0.0.1:5001
-
-# Rodar o job das exonerações na mão (sem esperar 08:30)
-.venv\Scripts\python.exe src\exonerar.py                    # edição mais recente
-.venv\Scripts\python.exe src\exonerar.py --date 2026-07-08  # uma data
-
-# Indexar a edição do dia na mão
-.venv\Scripts\python.exe src\index_build.py --latest
-
-# Perguntar pelo terminal
 .venv\Scripts\python.exe src\ask.py "quais decretos sairam hoje?"
 ```

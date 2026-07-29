@@ -1,3 +1,8 @@
+# CÓPIA DE SEGURANÇA. A fonte da verdade dos nomes monitorados é a tabela Oracle
+# IA0001_IOERJ_RAG_DIARIO_INTELIGENTE_002N (incluir = INSERT; retirar = UPDATE
+# preenchendo DATA_FIM). Este arquivo só é usado quando o banco não responde, para
+# o relatório do dia não sair sem a seção 3.
+#
 # Nomes monitorados no DOERJ (um por linha; linhas com # são ignoradas).
 # A varredura casa o PRIMEIRO e o ÚLTIMO nome, tolerando nomes do meio e acentos
 # (ex.: "Guilherme Mercês" casa "Guilherme Macedo Reis Mercês").

@@ -25,7 +25,7 @@ do mesmo dia saem de graca: nao re-chamam a IA sobre uma edicao ja processada.
 Uso:
     python src/run_pipeline.py                    # leitura (nao baixa)
     python src/run_pipeline.py --download         # baixa tambem (Playwright)
-    python src/run_pipeline.py --tema exoneracao  # so um tema no Oracle
+    python src/run_pipeline.py --tema exonerar    # so uma palavra-chave no Oracle
     python src/run_pipeline.py --force            # reprocessa tudo (GASTA IA)
 ============================================================================
 """
@@ -54,7 +54,8 @@ def main():
         pass
 
     ap = argparse.ArgumentParser(description="Pipeline de leitura do DOERJ (MinerU -> Excel -> Oracle).")
-    ap.add_argument("--tema", default="all", help="Tema dos atos no Oracle (padrao: all)")
+    ap.add_argument("--tema", default="all",
+                    help="Palavra-chave da 001B (ex.: exonerar) ou 'all' (padrao: all)")
     ap.add_argument("--download", action="store_true",
                     help="Tambem baixa o D.O. (padrao: nao; quem baixa e a tarefa DOERJ Downloader)")
     ap.add_argument("--skip-cadernos", action="store_true",
@@ -83,11 +84,22 @@ def main():
         _run("2/4 Cadernos leves IB/II/IV/V (ler_cadernos)", [rag_py, src / "ler_cadernos.py"])
 
     # 3) Exoneracoes -> Excel no OneDrive.
-    _run("3/4 Exoneracoes -> Excel", [rag_py, src / "exonerar.py"] + forca)
+    _run("3/5 Exoneracoes -> Excel", [rag_py, src / "exonerar.py"] + forca)
 
-    # 4) Atos de pessoal -> Oracle.
-    _run("4/4 Atos de pessoal -> Oracle",
+    # 4) Atos de pessoal -> Oracle (tabela 001A).
+    _run("4/5 Atos de pessoal -> Oracle (001A)",
          [rag_py, src / "atos_pessoal.py", "--tema", args.tema] + forca)
+
+    # 5) Monitor estruturado (8 temas) -> Excel + Oracle (002A). Usa o MONITOR_MODEL
+    #    (Haiku, mais barato). Idempotente: pula se o Excel canonico do dia ja existe.
+    _run("5/5 Monitor 8 temas -> Excel + Oracle (002A)",
+         [rag_py, src / "monitor_estruturado.py"] + forca)
+
+    # 6) Retencao de disco. NAO usa _run: falha de limpeza nao pode marcar como
+    #    fracassada uma execucao que ja gravou tudo no Oracle.
+    print("\n===== Limpeza (retencao de disco) =====", flush=True)
+    if subprocess.run([str(rag_py), str(src / "limpar.py")]).returncode != 0:
+        print("[ATENCAO] a limpeza falhou; o pipeline em si terminou bem.", flush=True)
 
     print("\n[done] pipeline completo com sucesso.", flush=True)
 

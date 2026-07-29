@@ -13,11 +13,12 @@ Idempotência: antes de inserir, apaga as linhas da MESMA edição + tema
 (EDICAO + RESPOSTA). Assim, rodar o job 2x no mesmo dia não duplica — igual ao
 "1 arquivo por dia" do job de Excel.
 
-Schema esperado (fornecido pelo usuário):
-  ID identity, RESPOSTA(150), TIPO(150), NUMERO(300), DATA_ATO DATE,
-  ORGAO(1000), PESSOA(500), CARGO(2000), OBJETO(4000), PROCESSO(100),
+Schema esperado :
+  ID, RESPOSTA(150), TIPO(150), NUMERO(300), DATA_ATO DATE, ORGAO(1000),
+  PESSOA(500), ID_FUNCIONAL(40), CARGO(2000), OBJETO(4000), PROCESSO(100),
   PAGINA(8), EDICAO DATE, DT_CARGA TIMESTAMP DEFAULT SYSTIMESTAMP.
-ID e DT_CARGA são preenchidos pelo próprio banco (identity / default).
+ID_FUNCIONAL = matrícula/IF do servidor (identificador único da pessoa).
+DT_CARGA é preenchido pelo próprio banco (default SYSTIMESTAMP).
 ============================================================================
 """
 import datetime
@@ -30,7 +31,7 @@ from search import MESES          # nome do mês -> número (reaproveitado da bu
 # antes de inserir e evitar ORA-12899 (value too large for column).
 _LIMITES = {
     "RESPOSTA": 150, "TIPO": 150, "NUMERO": 300, "ORGAO": 1000, "PESSOA": 500,
-    "CARGO": 2000, "OBJETO": 4000, "PROCESSO": 100, "PAGINA": 8,
+    "ID_FUNCIONAL": 40, "CARGO": 2000, "OBJETO": 4000, "PROCESSO": 100, "PAGINA": 8,
 }
 
 # Só nomes de tabela "sãos" (evita SQL injection pelo nome vindo do .env).
@@ -109,12 +110,128 @@ def _trunc(valor, n):
     return s[:n] if s else None
 
 
+def _qualificar(nome):
+    """Qualifica com o schema e coloca a TABELA entre ASPAS DUPLAS.
+
+    Nomes que começam com dígito (ex.: 0001IA_IOERJ_...) exigem aspas no Oracle,
+    senão dá ORA-00942/erro de sintaxe. Resultado: COE_IA."0001IA_..." (schema
+    sem aspas). O nome é validado (evita injeção pelo valor do .env)."""
+    if not _TABELA_RE.match(nome or ""):
+        raise RuntimeError(f"Nome de tabela invalido: {nome!r}")
+    schema = config.oracle_settings().get("schema") or ""
+    return f'{schema}."{nome}"' if schema else f'"{nome}"'
+
+
 def _tabela():
-    """Nome da tabela do .env, validado (evita SQL injection pelo nome)."""
-    tabela = config.oracle_settings()["table"]
-    if not _TABELA_RE.match(tabela):
-        raise RuntimeError(f"Nome de tabela invalido em ORACLE_TABLE: {tabela!r}")
-    return tabela
+    """Nome qualificado+aspas da tabela 001A (atos de pessoal), do .env."""
+    return _qualificar(config.oracle_settings()["table"])
+
+
+def _tabela_monitor():
+    """Nome qualificado+aspas da tabela 002A (monitor). Erro se não configurada."""
+    nome = config.oracle_settings().get("table_monitor")
+    if not nome:
+        raise RuntimeError("ORACLE_TABLE_MONITOR nao configurado no .env (tabela 002A).")
+    return _qualificar(nome)
+
+
+def _tabela_filtro():
+    """Nome qualificado+aspas da tabela 002B (pré-filtro do monitor)."""
+    nome = config.oracle_settings().get("table_filtro")
+    if not nome:
+        raise RuntimeError("ORACLE_TABLE_FILTRO nao configurado no .env (tabela 002B).")
+    return _qualificar(nome)
+
+
+def listar_palavras_filtro(edicao_iso=None):
+    """Palavras do PRÉ-FILTRO do monitor (002B) VIGENTES na data da edição.
+
+    São os termos que decidem quais páginas vão para a IA no monitor estruturado
+    ('fazenda', 'sefaz', 'ponto facultativo'...). Incluir um termo = mais páginas
+    lidas (mais recall, mais custo); retirar = menos páginas. Devolve a lista de
+    strings na ordem do ID."""
+    ref = _to_date(edicao_iso) or datetime.date.today()
+    con = get_connection()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            f"SELECT PALAVRA_CHAVE FROM {_tabela_filtro()} "
+            "WHERE PALAVRA_CHAVE IS NOT NULL "
+            "  AND (DATA_INI IS NULL OR DATA_INI <= :ed) "
+            "  AND (DATA_FIM IS NULL OR DATA_FIM >= :ed) "
+            "ORDER BY ID",
+            {"ed": ref},
+        )
+        return [(p or "").strip() for (p,) in cur.fetchall() if (p or "").strip()]
+    finally:
+        con.close()
+
+
+def _tabela_monitorados():
+    """Nome qualificado+aspas da tabela 002N (nomes monitorados). Erro se não configurada."""
+    nome = config.oracle_settings().get("table_monitorados")
+    if not nome:
+        raise RuntimeError("ORACLE_TABLE_MONITORADOS nao configurado no .env (tabela 002N).")
+    return _qualificar(nome)
+
+
+def _tabela_palavras():
+    """Nome qualificado+aspas da tabela 001B (palavras-chave). Erro se não configurada."""
+    nome = config.oracle_settings().get("table_palavras")
+    if not nome:
+        raise RuntimeError("ORACLE_TABLE_PALAVRAS nao configurado no .env (tabela 001B).")
+    return _qualificar(nome)
+
+
+def listar_palavras_chave(edicao_iso=None):
+    """Palavras-chave dos atos de pessoal (001B) VIGENTES na data da edição.
+
+    Mesma ideia da 002N: para procurar um novo tipo de ato no D.O., basta um
+    INSERT ('designar', 'aposentar'...); para parar, um UPDATE preenchendo
+    DATA_FIM. Devolve a lista de strings na ordem do ID."""
+    ref = _to_date(edicao_iso) or datetime.date.today()
+    con = get_connection()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            f"SELECT PALAVRA_CHAVE FROM {_tabela_palavras()} "
+            "WHERE PALAVRA_CHAVE IS NOT NULL "
+            "  AND (DATA_INI IS NULL OR DATA_INI <= :ed) "
+            "  AND (DATA_FIM IS NULL OR DATA_FIM >= :ed) "
+            "ORDER BY ID",
+            {"ed": ref},
+        )
+        return [(p or "").strip() for (p,) in cur.fetchall() if (p or "").strip()]
+    finally:
+        con.close()
+
+
+def listar_monitorados(edicao_iso=None):
+    """Lê a lista de pessoas monitoradas da tabela 002N, VIGENTES na data da edição.
+
+    Esta é a fonte da verdade dos nomes: para incluir alguém, basta um INSERT na
+    tabela; para retirar, um UPDATE preenchendo DATA_FIM (não precisa apagar a
+    linha — assim o histórico fica preservado e reprocessar uma edição antiga
+    continua usando a lista que valia NAQUELE dia).
+
+    Vigente na edição D = (DATA_INI nula ou <= D) E (DATA_FIM nula ou >= D).
+    Devolve [{"nome": ..., "funcao": ...}] na ordem do ID."""
+    ref = _to_date(edicao_iso) or datetime.date.today()
+    con = get_connection()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            f"SELECT NOME, FUNCAO FROM {_tabela_monitorados()} "
+            "WHERE NOME IS NOT NULL "
+            "  AND (DATA_INI IS NULL OR DATA_INI <= :ed) "
+            "  AND (DATA_FIM IS NULL OR DATA_FIM >= :ed) "
+            "ORDER BY ID",
+            {"ed": ref},
+        )
+        return [{"nome": (n or "").strip(), "funcao": (f or "").strip()}
+                for n, f in cur.fetchall() if (n or "").strip()]
+    finally:
+        con.close()
 
 
 def ja_gravado(resposta, edicao_iso):
@@ -151,6 +268,7 @@ def save_atos(resposta, edicao_iso, itens):
             "data_ato": _to_date(it.get("data")),
             "orgao": _trunc(it.get("orgao"), _LIMITES["ORGAO"]),
             "pessoa": _trunc(it.get("pessoa"), _LIMITES["PESSOA"]),
+            "id_funcional": _trunc(it.get("id_funcional"), _LIMITES["ID_FUNCIONAL"]),
             "cargo": _trunc(it.get("cargo"), _LIMITES["CARGO"]),
             "objeto": _trunc(it.get("objeto"), _LIMITES["OBJETO"]),
             "processo": _trunc(it.get("processo"), _LIMITES["PROCESSO"]),
@@ -171,10 +289,10 @@ def save_atos(resposta, edicao_iso, itens):
         if linhas:
             cur.executemany(
                 f"INSERT INTO {tabela} "
-                "(RESPOSTA, TIPO, NUMERO, DATA_ATO, ORGAO, PESSOA, CARGO, OBJETO, "
-                " PROCESSO, PAGINA, EDICAO) VALUES "
-                "(:resposta, :tipo, :numero, :data_ato, :orgao, :pessoa, :cargo, "
-                " :objeto, :processo, :pagina, :edicao)",
+                "(RESPOSTA, TIPO, NUMERO, DATA_ATO, ORGAO, PESSOA, ID_FUNCIONAL, CARGO, "
+                " OBJETO, PROCESSO, PAGINA, EDICAO) VALUES "
+                "(:resposta, :tipo, :numero, :data_ato, :orgao, :pessoa, :id_funcional, "
+                " :cargo, :objeto, :processo, :pagina, :edicao)",
                 linhas,
             )
         con.commit()
@@ -184,124 +302,73 @@ def save_atos(resposta, edicao_iso, itens):
 
 
 # ==========================================================================
-#  MONITORAMENTO (8 seções) -> uma tabela por tema
+#  MONITORAMENTO (8 seções) -> UMA tabela única (002A)
 # ==========================================================================
-# seção (número) -> nome da tabela. Fonte da verdade dos nomes.
-TABELAS_MONITOR = {
-    1: "DOERJ_PRAZOS",
-    2: "DOERJ_MOVIMENTACOES",
-    3: "DOERJ_NOMES_MONITORADOS",
-    4: "DOERJ_OBSERVACOES",
-    5: "DOERJ_EXPEDIENTE",
-    6: "DOERJ_TCE",
-    7: "DOERJ_LEGISLATIVO",
-    8: "DOERJ_MUNICIPALIDADES",
-}
-
-# Tamanho de cada coluna (as 8 tabelas têm o mesmo formato).
-_LIM_MON = {
-    "CADERNO": 30, "PAGINA": 8, "CATEGORIA": 40, "TIPO_ATO": 200, "NUMERO_ANO": 100,
-    "ORGAO": 500, "PESSOA": 2000, "CARGO": 500, "PROCESSO": 150, "VIGENCIA": 150,
-    "RESUMO": 4000,
+# Tamanhos das colunas da 002A (mais apertados que os do Excel).
+_LIM_002 = {
+    "TIPO": 26, "TIPO_ATO": 120, "NUMERO_ANO": 56, "ORGAO": 128, "PESSOA": 360,
+    "CARGO": 104, "PROCESSO": 200, "VIGENCIA": 56, "RESUMO": 704, "CADERNO": 48,
 }
 
 
-def _qual(tabela):
-    """Qualifica o nome com o schema do .env (ex.: COE_IA.DOERJ_PRAZOS), se houver."""
-    schema = config.oracle_settings().get("schema") or ""
-    nome = f"{schema}.{tabela}" if schema else tabela
-    if not _TABELA_RE.match(nome):
-        raise RuntimeError(f"Nome de tabela/schema invalido: {nome!r}")
-    return nome
+def _pagina_num(valor):
+    """Primeiro inteiro do texto de página ('20-21' -> 20, '' -> None). PAGINA é NUMBER na 002A."""
+    m = re.search(r"\d+", str(valor or ""))
+    return int(m.group()) if m else None
 
 
-def _ddl_monitor(tabela):
-    return (
-        f"CREATE TABLE {_qual(tabela)} (\n"
-        "    ID          NUMBER(19) GENERATED ALWAYS AS IDENTITY,\n"
-        "    EDICAO      DATE,\n"
-        "    CADERNO     VARCHAR2(30),\n"
-        "    PAGINA      VARCHAR2(8),\n"
-        "    CATEGORIA   VARCHAR2(40),\n"
-        "    TIPO_ATO    VARCHAR2(200),\n"
-        "    NUMERO_ANO  VARCHAR2(100),\n"
-        "    ORGAO       VARCHAR2(500),\n"
-        "    PESSOA      VARCHAR2(2000),\n"
-        "    CARGO       VARCHAR2(500),\n"
-        "    PROCESSO    VARCHAR2(150),\n"
-        "    VIGENCIA    VARCHAR2(150),\n"
-        "    RESUMO      VARCHAR2(4000),\n"
-        "    DT_CARGA    TIMESTAMP DEFAULT SYSTIMESTAMP,\n"
-        f"    CONSTRAINT PK_{tabela} PRIMARY KEY (ID)\n"
-        ")"
-    )
-
-
-def criar_tabelas_monitor():
-    """Cria as 8 tabelas do monitoramento (idempotente: ignora 'já existe' ORA-00955).
-
-    Útil para o schema do próprio usuário. Em produção, o DBA roda o mesmo DDL."""
+def ja_gravado_monitor(edicao_iso):
+    """True se a 002A já tem linhas desta edição (trava de custo no pipeline)."""
+    alvo = _tabela_monitor()
     con = get_connection()
     try:
         cur = con.cursor()
-        criadas = []
-        for tabela in TABELAS_MONITOR.values():
-            try:
-                cur.execute(_ddl_monitor(tabela))
-                criadas.append(_qual(tabela))
-            except Exception as e:  # noqa: BLE001
-                if "ORA-00955" in str(e):     # name is already used by an existing object
-                    continue
-                raise
-        con.commit()
-        return criadas
+        cur.execute(f"SELECT COUNT(*) FROM {alvo} WHERE DATA_EDICAO = :ed",
+                    {"ed": _to_date(edicao_iso)})
+        return cur.fetchone()[0] > 0
     finally:
         con.close()
 
 
-def salvar_monitoramento(edicao_iso, itens, categoria_secao):
-    """Grava os itens do monitor nas 8 tabelas por seção. Idempotente por EDICAO.
-
-    `categoria_secao`: dict categoria(str)->número da seção (de monitor_estruturado).
-    Devolve {tabela: nº_linhas_inseridas}."""
+def salvar_monitoramento(edicao_iso, itens, categoria_secao=None):
+    """Grava os itens do monitor na tabela ÚNICA 002A. Idempotente por DATA_EDICAO
+    (DELETE da edição + INSERT). `TIPO` recebe a categoria técnica do item.
+    Devolve o nº de linhas inseridas. (`categoria_secao` mantido só por compat.)"""
+    alvo = _tabela_monitor()
     edicao_date = _to_date(edicao_iso)
-    por_tabela = {t: [] for t in TABELAS_MONITOR.values()}
-    for it in itens:
-        sec = categoria_secao.get((it.get("categoria") or "").strip().upper())
-        if not sec:
-            continue
-        por_tabela[TABELAS_MONITOR[sec]].append({
-            "edicao": edicao_date,
-            "caderno": _trunc(it.get("caderno"), _LIM_MON["CADERNO"]),
-            "pagina": _trunc(it.get("pagina"), _LIM_MON["PAGINA"]),
-            "categoria": _trunc(it.get("categoria"), _LIM_MON["CATEGORIA"]),
-            "tipo_ato": _trunc(it.get("tipo_ato"), _LIM_MON["TIPO_ATO"]),
-            "numero_ano": _trunc(it.get("numero_ano"), _LIM_MON["NUMERO_ANO"]),
-            "orgao": _trunc(it.get("orgao"), _LIM_MON["ORGAO"]),
-            "pessoa": _trunc(it.get("pessoa"), _LIM_MON["PESSOA"]),
-            "cargo": _trunc(it.get("cargo"), _LIM_MON["CARGO"]),
-            "processo": _trunc(it.get("processo"), _LIM_MON["PROCESSO"]),
-            "vigencia": _trunc(it.get("vigencia"), _LIM_MON["VIGENCIA"]),
-            "resumo": _trunc(it.get("resumo"), _LIM_MON["RESUMO"]),
-        })
+    linhas = [
+        {
+            "tipo": _trunc((it.get("categoria") or "").strip().upper(), _LIM_002["TIPO"]),
+            "tipo_ato": _trunc(it.get("tipo_ato"), _LIM_002["TIPO_ATO"]),
+            "numero_ano": _trunc(it.get("numero_ano"), _LIM_002["NUMERO_ANO"]),
+            "orgao": _trunc(it.get("orgao"), _LIM_002["ORGAO"]),
+            "pessoa": _trunc(it.get("pessoa"), _LIM_002["PESSOA"]),
+            "cargo": _trunc(it.get("cargo"), _LIM_002["CARGO"]),
+            "processo": _trunc(it.get("processo"), _LIM_002["PROCESSO"]),
+            "vigencia": _trunc(it.get("vigencia"), _LIM_002["VIGENCIA"]),
+            "resumo": _trunc(it.get("resumo"), _LIM_002["RESUMO"]),
+            "caderno": _trunc(it.get("caderno"), _LIM_002["CADERNO"]),
+            "data_edicao": edicao_date,
+            "data_ato": _to_date(it.get("data_ato")),
+            "prazo": _to_date(it.get("prazo")),
+            "pagina": _pagina_num(it.get("pagina")),
+        }
+        for it in itens
+    ]
 
     con = get_connection()
     try:
         cur = con.cursor()
-        resultados = {}
-        for tabela, linhas in por_tabela.items():
-            alvo = _qual(tabela)
-            cur.execute(f"DELETE FROM {alvo} WHERE EDICAO = :ed", {"ed": edicao_date})
-            if linhas:
-                cur.executemany(
-                    f"INSERT INTO {alvo} (EDICAO, CADERNO, PAGINA, CATEGORIA, TIPO_ATO, "
-                    "NUMERO_ANO, ORGAO, PESSOA, CARGO, PROCESSO, VIGENCIA, RESUMO) VALUES "
-                    "(:edicao, :caderno, :pagina, :categoria, :tipo_ato, :numero_ano, "
-                    ":orgao, :pessoa, :cargo, :processo, :vigencia, :resumo)",
-                    linhas,
-                )
-            resultados[tabela] = len(linhas)
+        cur.execute(f"DELETE FROM {alvo} WHERE DATA_EDICAO = :ed", {"ed": edicao_date})
+        if linhas:
+            cur.executemany(
+                f"INSERT INTO {alvo} (TIPO, TIPO_ATO, NUMERO_ANO, ORGAO, PESSOA, CARGO, "
+                "PROCESSO, VIGENCIA, RESUMO, CADERNO, DATA_EDICAO, DATA_ATO, PRAZO, PAGINA) "
+                "VALUES (:tipo, :tipo_ato, :numero_ano, :orgao, :pessoa, :cargo, "
+                ":processo, :vigencia, :resumo, :caderno, :data_edicao, :data_ato, :prazo, :pagina)",
+                linhas,
+            )
         con.commit()
-        return resultados
+        return len(linhas)
     finally:
         con.close()

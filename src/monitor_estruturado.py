@@ -1,3 +1,4 @@
+
 """
 ============================================================================
 monitor_estruturado.py · Reproduz, ESTRUTURADO, o "Monitoramento DOERJ"
@@ -15,6 +16,7 @@ Uso:
 ============================================================================
 """
 import argparse
+import difflib
 import json
 import re
 import sqlite3
@@ -24,6 +26,7 @@ import unicodedata
 from pathlib import Path
 
 import config
+import oracle_db
 from search import list_dates, page_content
 
 # categoria (da IA) -> número da seção do relatório
@@ -39,6 +42,21 @@ CATEGORIA_SECAO = {
     "MUNICIPALIDADES_PEDIDO": 8,
 }
 
+_CATEGORIAS_VALIDAS = list(CATEGORIA_SECAO.keys())
+
+
+def _canon_categoria(cat):
+    """Normaliza a categoria vinda da IA para o conjunto canonico. O modelo as vezes
+    erra a grafia (ex.: 'OBSERVACAO_EXECUTIVE' sem o 'A'); aqui casamos pelo mais
+    parecido. Categoria irreconhecivel cai em OBSERVACAO_EXECUTIVA (nunca descarta o
+    item nem cria um TIPO invalido no banco / seção fantasma no Excel)."""
+    c = (cat or "").strip().upper().replace(" ", "_").replace("-", "_")
+    if c in CATEGORIA_SECAO:
+        return c
+    aprox = difflib.get_close_matches(c, _CATEGORIAS_VALIDAS, n=1, cutoff=0.8)
+    return aprox[0] if aprox else "OBSERVACAO_EXECUTIVA"
+
+
 SECOES = {
     1: "1 - Prazos Criticos",
     2: "2 - Movimentacoes de Pessoal",
@@ -50,10 +68,10 @@ SECOES = {
     8: "8 - Municipalidades e Pedido (IV-V)",
 }
 
-COLUNAS = ["Tipo do Ato", "Numero/Ano", "Orgao", "Pessoa", "Cargo",
-           "Processo", "Vigencia", "Resumo", "Caderno", "Pagina"]
-CHAVES = ["tipo_ato", "numero_ano", "orgao", "pessoa", "cargo",
-          "processo", "vigencia", "resumo", "caderno", "pagina"]
+COLUNAS = ["Tipo do Ato", "Numero/Ano", "Orgao", "Pessoa", "Cargo", "Processo",
+           "Vigencia", "Data do Ato", "Prazo", "Resumo", "Caderno", "Pagina"]
+CHAVES = ["tipo_ato", "numero_ano", "orgao", "pessoa", "cargo", "processo",
+          "vigencia", "data_ato", "prazo", "resumo", "caderno", "pagina"]
 
 SYSTEM = (
     "Voce e analista senior da SEFAZ-RJ com 15 anos lendo o DOERJ. Do TEXTO fornecido, "
@@ -64,27 +82,48 @@ SYSTEM = (
     "Estado de Receita (SER), Subsecretaria de Controle Interno, Subsecretaria do Tesouro, "
     "Conselho de Contribuintes (CC), Junta de Revisao Fiscal (JRF), Auditoria Fiscal.\n\n"
     "NAO SAO SEFAZ (EXCLUA o ato, a menos que seja EXPLICITAMENTE conjunto/bilateral com a "
-    "SEFAZ): JUCERJA, LOTERJ, SEDEC (Desenvolvimento Economico), Casa Civil, DETRAN, INEA, "
-    "Saude, Educacao (SEEDUC), Seguranca/Policia (SEPOL/PM/CBMERJ), Planejamento (SEPLAG), "
-    "Ciencia e Tecnologia, Cultura, Esporte, Ambiente, AGENERSA e demais secretarias/orgaos "
-    "sem efeito direto na Fazenda. Municipio (prefeitura) so entra se a SEFAZ for parte.\n\n"
+    "SEFAZ): JUCERJA, LOTERJ, SEDEC/SEDEICS (Desenvolvimento Economico), Casa Civil, DETRAN, "
+    "INEA, Saude, Educacao (SEEDUC), Seguranca/Policia (SEPOL/PM/CBMERJ), Planejamento "
+    "(SEPLAG), CGE/Controladoria Geral do Estado, SEOBRAS/SEIOP (Obras), DER-RJ, Ciencia e "
+    "Tecnologia, Cultura, Esporte, Ambiente, AGENERSA e demais secretarias/orgaos sem efeito "
+    "direto na Fazenda. Municipio (prefeitura) so entra se a SEFAZ for parte.\n"
+    "REGRA DE OURO (evita falso positivo): julgue CADA ato pelo ORGAO DELE, nao pela pagina. "
+    "Uma pagina pode misturar atos da SEFAZ com atos de outros orgaos; extraia SO os da SEFAZ. "
+    "Atos INTERNOS de outro orgao (aposentadoria, PAD, sindicancia, PAR, nomeacao/exoneracao de "
+    "servidor de OUTRO orgao, PCAN/pauta de outro orgao) NAO entram, mesmo que a mesma pagina "
+    "tenha materia da SEFAZ, e mesmo que o servidor um dia tenha passado pela Fazenda. Excecao: "
+    "cessao/permuta em que a SEFAZ e a origem OU o destino do servidor (isso e SEFAZ).\n\n"
     "Responda EXCLUSIVAMENTE com um objeto JSON valido (sem texto antes/depois, sem ```), no "
     'formato: {"itens":[{"categoria":"","tipo_ato":"","numero_ano":"","orgao":"","pessoa":"",'
-    '"cargo":"","processo":"","vigencia":"","resumo":"","pagina":""}]}\n\n'
+    '"cargo":"","processo":"","vigencia":"","data_ato":"","prazo":"","resumo":"","pagina":""}]}\n\n'
     "categoria = UMA de: PRAZO_CRITICO | MOVIMENTACAO_PESSOAL | NOMES_MONITORADOS | "
     "OBSERVACAO_EXECUTIVA | DESTAQUE_CONTROLE_INTERNO | EXPEDIENTE_PONTO_FACULTATIVO | "
     "TCE_SEFAZ | LEGISLATIVO_FAZENDARIO | MUNICIPALIDADES_PEDIDO.\n"
     "Guia de categoria:\n"
-    "- PRAZO_CRITICO: ato que gera acao/prazo para a SEFAZ (sessao de julgamento, vencimento, "
-    "verificacao, disponibilizacao de acordao no portal, licenca com inicio/fim). So se o "
-    "titular do prazo for a SEFAZ (nao terceiro).\n"
+    "- PRAZO_CRITICO: ato SEFAZ/Rioprevidencia que gera acao/prazo (sessao de julgamento, "
+    "vencimento, verificacao, disponibilizacao de acordao no portal, licenca com inicio/fim, "
+    "recurso de concurso/processo, convocacao de beneficiario/herdeiro com prazo). INCLUA aqui "
+    "licitacoes/pregoes/concorrencias/chamamentos em que a SEFAZ e a contratante/promotora, "
+    "quando houver data de abertura de sessao, entrega/abertura de propostas ou habilitacao "
+    "(mesmo que quem cumpra o prazo sejam os licitantes: a SEFAZ conduz a sessao). So se o "
+    "titular OU o condutor do prazo for a SEFAZ/Rioprevidencia (nao terceiro).\n"
+    "NAO E PRAZO_CRITICO (vao para OBSERVACAO_EXECUTIVA): ato JA CONSUMADO sem acao pendente - "
+    "deferimento/concessao de isencao, concessao de aposentadoria/pensao, defesa ja julgada. "
+    "So e PRAZO_CRITICO se houver uma ACAO A CUMPRIR ate uma data futura.\n"
+    "PRAZO (obrigatorio em PRAZO_CRITICO): SEMPRE preencha 'prazo' com a data-limite em "
+    "DD/MM/AAAA. Se o texto disser 'N dias (uteis) a contar de DD/MM/AAAA', calcule a data "
+    "final e coloque em 'prazo'. Se der so a data final, use-a. Todo item PRAZO_CRITICO deve "
+    "sair com 'prazo' preenchido; se nao houver data-limite futura, NAO e prazo -> reclassifique.\n"
     "- MOVIMENTACAO_PESSOAL: nomeacao/exoneracao/designacao/remocao/cessao/afastamento de "
     "servidor fazendario (ou cargo de comando de outro poder). Membros de comissao NAO contam.\n"
     "- NOMES_MONITORADOS: ato concreto sobre Guilherme Merces (Secretario de Fazenda) ou sobre "
     "o Chefe de Gabinete / Subsecretario / Subsecretario Adjunto da SEFAZ.\n"
     "- OBSERVACAO_EXECUTIVA: decretos com impacto orcamentario (credito suplementar/dotacao), "
-    "resolucoes, portarias de superintendencia, atas de colegiado, Conselho de Contribuintes, "
-    "termos aditivos, cancelamento de IE, instituicao de comissao.\n"
+    "leis e leis complementares de interesse fazendario (LDO, LOA, diretrizes orcamentarias), "
+    "MENSAGENS DE VETO a dispositivos com impacto fazendario (gere um item PROPRIO para o veto, "
+    "SEPARADO da lei sancionada, citando os artigos vetados e o motivo do veto), resolucoes, "
+    "portarias de superintendencia, atas de colegiado, Conselho de Contribuintes, termos "
+    "aditivos, cancelamento de IE, instituicao de comissao.\n"
     "- DESTAQUE_CONTROLE_INTERNO: Controle Interno, Corregedoria Tributaria (CTCE), Auditoria "
     "Interna/AGE com vinculo SEFAZ, Tomada de Contas Especial da SEFAZ.\n"
     "- EXPEDIENTE_PONTO_FACULTATIVO: ponto facultativo/expediente/feriado/recesso estadual.\n"
@@ -97,8 +136,20 @@ SYSTEM = (
     "- MUNICIPALIDADES_PEDIDO: ato (Partes IV/V) onde a SEFAZ/Rioprevidencia e a publicadora, "
     "contratante ou conveniada. NAO inclua atos de prefeituras ou de outras secretarias (ex.: "
     "SEDEC) so por citarem 'Fazenda' generico.\n"
-    "Preencha 'pagina' com o numero do rotulo [pagina N]. Deixe campos vazios como \"\". "
-    "Nao invente. Na duvida sobre relevancia para a SEFAZ, NAO inclua. Se nada relevante, itens=[]."
+    "CONSOLIDACAO: quando UM MESMO ato (ex.: um despacho do Secretario, um edital) decide/julga "
+    "VARIOS itens homogeneos de uma vez (ex.: 'julgamento de N recursos', lista de varios "
+    "processos/contribuintes), gere UM UNICO item informando a QUANTIDADE no 'resumo' "
+    "(ex.: '13 recursos julgados, todos providos...') e citando as principais partes, em vez de "
+    "um item por sub-ato ou de apenas um exemplo.\n"
+    "FIDELIDADE: transcreva 'cargo', 'pessoa' e 'orgao' EXATAMENTE como aparecem no D.O., sem "
+    "corrigir grafia nem alterar genero (ex.: se o texto diz 'Auditor Fiscal', nao escreva "
+    "'Auditora Fiscal').\n"
+    "Preencha 'pagina' com o numero do rotulo [pagina N].\n"
+    "'data_ato' = data em que o ato foi assinado/publicado, se houver (formato DD/MM/AAAA).\n"
+    "'prazo' = data-limite da acao, quando houver (tipico em PRAZO_CRITICO: sessao, vencimento, "
+    "entrega). Se nao houver data, deixe \"\".\n"
+    "Deixe campos vazios como \"\". Nao invente datas. "
+    "Na duvida sobre relevancia para a SEFAZ, NAO inclua. Se nada relevante, itens=[]."
 )
 
 
@@ -120,6 +171,9 @@ def _paginas_do_caderno(caderno, date):
 # importam mesmo sem citar a Fazenda (ponto facultativo, feriado, recesso,
 # expediente, credito orçamentario). Assim o pré-filtro corta o irrelevante (atos
 # de outras secretarias) sem perder o que é relevante por natureza estadual.
+#
+# A lista VIGENTE vem da tabela Oracle 002B (ver _carregar_kw_relevancia); esta
+# tupla é a RESERVA, usada só quando o banco não responde.
 _KW_RELEVANCIA = (
     # --- SEFAZ / Fazenda / órgãos vinculados ---
     "fazenda", "sefaz", "rioprevid", "fundo unico", "tesouro", "supcc", "supat", "supbf",
@@ -135,13 +189,48 @@ _KW_RELEVANCIA = (
 )
 
 
-def _pagina_relevante(content):
-    n = _norm(content)
-    return any(k in n for k in _KW_RELEVANCIA)
+def _carregar_kw_relevancia(date):
+    """Termos do pré-filtro vigentes na edição -> (lista, origem).
+
+    Fonte da verdade: tabela Oracle 002B (incluir/retirar um termo é INSERT/UPDATE
+    lá). Se o banco não responder, usa a tupla _KW_RELEVANCIA de reserva — rodar
+    com a lista de ontem é melhor do que mandar a edição inteira para a IA (caro)
+    ou não mandar nada (relatório vazio)."""
+    if oracle_db.configurado() and config.oracle_settings().get("table_filtro"):
+        try:
+            kws = oracle_db.listar_palavras_filtro(date)
+            if kws:
+                return kws, "Oracle (002B)"
+            print("[ATENCAO] a tabela 002B nao tem termo vigente nesta edicao -> "
+                  "usando a lista de reserva do codigo.")
+        except Exception as e:  # noqa: BLE001 - banco fora do ar nao pode derrubar o job
+            print(f"[ATENCAO] falha ao ler o pre-filtro no Oracle (002B): "
+                  f"{type(e).__name__}: {str(e)[:200]} -> usando a lista de reserva.")
+    else:
+        print("[monitor] Oracle/002B nao configurado -> usando a lista de reserva.")
+    return list(_KW_RELEVANCIA), "lista de reserva (codigo)"
 
 
-def _paginas_relevantes(caderno, date):
-    """Páginas do caderno que mencionam algum termo SEFAZ (pré-filtro de custo)."""
+def _compilar_kw(kws):
+    """Compila os termos num regex único de prefixo-com-limite-de-palavra.
+
+    Por que \\b e não `termo in texto`: termos curtos precisam começar em palavra
+    ('icms' não pode casar dentro de outro token). Antes isso era feito com um
+    espaço no INÍCIO do termo (" icms"), o que numa tabela editada à mão some sem
+    ninguém ver. O \\b faz o mesmo, e o prefixo continua valendo à direita
+    ('tributa' casa 'tributacao', 'tributario')."""
+    termos = [re.escape(_norm(k).strip()) for k in kws if _norm(k).strip()]
+    if not termos:
+        return None
+    return re.compile(r"\b(?:" + "|".join(termos) + r")")
+
+
+def _pagina_relevante(content, rx):
+    return bool(rx.search(_norm(content))) if rx else False
+
+
+def _paginas_relevantes(caderno, date, rx):
+    """Páginas do caderno que mencionam algum termo do pré-filtro (corte de custo)."""
     con = sqlite3.connect(config.DB_PATH)
     try:
         rows = con.execute(
@@ -151,7 +240,7 @@ def _paginas_relevantes(caderno, date):
     finally:
         con.close()
     return [{"pdf": r[0], "caderno": r[1], "date": r[2], "page": int(r[3])}
-            for r in rows if _pagina_relevante(r[4])]
+            for r in rows if _pagina_relevante(r[4], rx)]
 
 
 def _cadernos_da_edicao(date):
@@ -169,6 +258,21 @@ def _norm(s):
     """minúsculo e sem acento — para casar nomes de forma robusta."""
     s = unicodedata.normalize("NFKD", s or "")
     return "".join(c for c in s if not unicodedata.combining(c)).lower()
+
+
+# Hífen de fim de linha entre dois pedaços de palavra ("verbica- rio").
+_RE_HIFEN = re.compile(r"(\w)-\s+(\w)")
+
+
+def _dehifenizar(texto):
+    """Junta as palavras que o PDF quebrou com hífen no fim da linha.
+
+    O DOERJ é diagramado em colunas justificadas, então nomes são partidos ao
+    meio: 'FABIO ROCHA VERBICÁ- RIO'. Sem isto, o casamento por palavra inteira
+    não acha 'verbicario' e o monitorado some do relatório — foi o que aconteceu
+    com a licença-prêmio do Verbicário em 29/07/2026. Vale para 37 das 62 páginas
+    de uma edição típica da Parte I."""
+    return _RE_HIFEN.sub(r"\1\2", texto or "")
 
 
 def _tokens_nome(nome):
@@ -196,12 +300,37 @@ def _casa_nome(texto_norm, toks):
     return -1
 
 
+def _carregar_monitorados(date):
+    """Lista de monitorados VIGENTES na edição -> ([{"nome","funcao"}], origem).
+
+    Fonte da verdade: tabela Oracle 002N (incluir/retirar um nome é INSERT/UPDATE
+    lá, sem mexer em arquivo nem reiniciar nada). Se o banco não responder, cai
+    para monitorados.txt: melhor uma lista possivelmente desatualizada do que um
+    relatório sem a seção 3."""
+    cfg = config.oracle_settings()
+    if oracle_db.configurado() and cfg.get("table_monitorados"):
+        try:
+            nomes = oracle_db.listar_monitorados(date)
+            if nomes:
+                return nomes, "Oracle (002N)"
+            print("[ATENCAO] a tabela 002N nao tem nome vigente nesta edicao -> "
+                  "usando monitorados.txt.")
+        except Exception as e:  # noqa: BLE001 - banco fora do ar nao pode derrubar o job
+            print(f"[ATENCAO] falha ao ler os monitorados no Oracle (002N): "
+                  f"{type(e).__name__}: {str(e)[:200]} -> usando monitorados.txt.")
+    else:
+        print("[monitor] Oracle/002N nao configurado -> usando monitorados.txt.")
+    return ([{"nome": n, "funcao": ""} for n in config.nomes_monitorados()],
+            "arquivo monitorados.txt")
+
+
 def _scan_monitorados(date):
-    """Varredura textual DETERMINÍSTICA dos nomes de monitorados.txt nos 5 cadernos
-    da edição. Não usa IA. Devolve itens NOMES_MONITORADOS (um por nome+página)."""
-    nomes = config.nomes_monitorados()
-    if not nomes:
-        return []
+    """Varredura textual DETERMINÍSTICA dos nomes monitorados nos 5 cadernos da
+    edição. Não usa IA. Devolve (itens NOMES_MONITORADOS - um por nome+página -,
+    origem da lista, nº de nomes vigentes)."""
+    monitorados, origem = _carregar_monitorados(date)
+    if not monitorados:
+        return [], origem, 0
     con = sqlite3.connect(config.DB_PATH)
     try:
         linhas = con.execute(
@@ -209,25 +338,37 @@ def _scan_monitorados(date):
         ).fetchall()
     finally:
         con.close()
+    # Normaliza cada página UMA vez (antes era 1x por nome x página, sobre o mesmo
+    # texto). Guarda duas leituras: como veio e sem as quebras hifenizadas.
+    paginas = [(caderno, page, content, _norm(content), _dehifenizar(content))
+               for caderno, page, content in linhas]
+    paginas = [(c, p, txt, n, deh, _norm(deh)) for c, p, txt, n, deh in paginas]
+
     itens, vistos = [], set()
-    for nome in nomes:
+    for m in monitorados:
+        nome = m["nome"]
         toks = _tokens_nome(nome)
         if len(toks) < 2:
             continue
-        for caderno, page, content in linhas:
-            pos = _casa_nome(_norm(content), toks)
+        for caderno, page, content, n_txt, deh, n_deh in paginas:
+            # Tenta primeiro o texto como veio; só então o de-hifenizado (juntar
+            # pedaços pode, em tese, colar um sobrenome no seguinte).
+            pos, base = _casa_nome(n_txt, toks), content
+            if pos < 0:
+                pos, base = _casa_nome(n_deh, toks), deh
             if pos < 0:
                 continue
             chave = (nome, caderno, page)
             if chave in vistos:
                 continue
             vistos.add(chave)
-            ini, fim = max(0, pos - 40), min(len(content), pos + 160)
-            trecho = " ".join(content[ini:fim].split())
+            ini, fim = max(0, pos - 40), min(len(base), pos + 160)
+            trecho = " ".join(base[ini:fim].split())
             itens.append({"categoria": "NOMES_MONITORADOS", "pessoa": nome,
+                          "cargo": m.get("funcao", ""),
                           "tipo_ato": "Mencao no D.O.", "caderno": caderno,
                           "pagina": str(page), "resumo": trecho})
-    return itens
+    return itens, origem, len(monitorados)
 
 
 def _extrair_json(resp):
@@ -287,7 +428,7 @@ def _mapear_bloco(caderno, paginas, client, max_tokens=8000):
     return itens, usage, True
 
 
-def gerar(date=None, destino=None, chunk=4, todas_paginas=False):
+def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
@@ -302,19 +443,37 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False):
     if not config.current_api_key():
         sys.exit("[ERRO] ANTHROPIC_API_KEY nao definido no .env.")
 
+    # Trava de idempotencia (para o pipeline horario): se o Excel CANONICO desta
+    # edicao ja existe e nao e --force, nao re-extrai (economiza IA). O canonico so
+    # e gravado numa rodada COMPLETA, entao existir = ja foi processada com sucesso.
+    destino = Path(destino) if destino else config.RELATORIOS_DIR
+    destino.mkdir(parents=True, exist_ok=True)
+    canonico = destino / f"monitoramento_{date}.xlsx"
+    if canonico.exists() and not force:
+        print(f"[monitor] {canonico.name} ja existe -> pulando (use --force para refazer).")
+        return canonico
+
     client = config.get_client()
     print(f"[monitor] modelo da extracao: {config.MONITOR_MODEL}"
           f"{' (== site)' if config.MONITOR_MODEL == config.MODEL else ' (mais barato que o site)'}")
     todos = []
     uin = uout = 0
     blocos_total = blocos_falha = 0
+
+    # Termos do pré-filtro (002B): lidos UMA vez por execução e compilados.
+    rx_kw = None
+    if not todas_paginas:
+        kws, origem_kw = _carregar_kw_relevancia(date)
+        rx_kw = _compilar_kw(kws)
+        print(f"[monitor] pre-filtro: {len(kws)} termo(s) vigente(s) (fonte: {origem_kw})")
+
     for caderno in _cadernos_da_edicao(date):
         # Pré-filtro de custo: só páginas com termos SEFAZ vão para a IA (a menos
         # que --todas-paginas). Cadernos sem página relevante são pulados.
         if todas_paginas:
             paginas = _paginas_do_caderno(caderno, date)
         else:
-            paginas = _paginas_relevantes(caderno, date)
+            paginas = _paginas_relevantes(caderno, date, rx_kw)
         if not paginas:
             print(f"[monitor] {caderno}: 0 paginas relevantes (SEFAZ) -> pulado")
             continue
@@ -327,11 +486,18 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False):
             uin += usage["input"]; uout += usage["output"]
             time.sleep(2)                 # espaça as chamadas (evita rate-limit da Foundry)
 
+    # Normaliza a categoria da IA para o conjunto canônico (corrige typos do modelo,
+    # ex.: OBSERVACAO_EXECUTIVE -> OBSERVACAO_EXECUTIVA) ANTES de gravar/filtrar.
+    for it in todos:
+        it["categoria"] = _canon_categoria(it.get("categoria"))
+
     # NOMES_MONITORADOS vem da varredura DETERMINÍSTICA (confiável, sem depender
     # da IA): descarta o que a IA marcou nessa categoria e usa a lista de nomes.
-    todos = [it for it in todos if (it.get("categoria") or "").strip().upper() != "NOMES_MONITORADOS"]
-    monit = _scan_monitorados(date)
+    todos = [it for it in todos if it.get("categoria") != "NOMES_MONITORADOS"]
+    monit, origem, n_vigentes = _scan_monitorados(date)
     todos.extend(monit)
+    print(f"[monitor] lista de monitorados: {n_vigentes} nome(s) vigente(s) em {date} "
+          f"(fonte: {origem})")
     if monit:
         nomes_achados = sorted({m["pessoa"] for m in monit})
         print(f"[monitor] nomes monitorados: {len(monit)} mencao(oes) de {len(nomes_achados)} "
@@ -342,9 +508,8 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False):
           f"falhas: {blocos_falha} (tokens: entrada {uin} / saida {uout})")
 
     # Não sobrescreve um relatório COMPLETO com um PARCIAL: parcial vai para
-    # *_PARCIAL.xlsx; só uma rodada sem falhas grava o nome canônico.
-    destino = Path(destino) if destino else (config.ROOT / "relatorios")
-    destino.mkdir(parents=True, exist_ok=True)
+    # *_PARCIAL.xlsx; só uma rodada sem falhas grava o nome canônico (destino já
+    # criado na trava acima).
     sufixo = "" if completo else "_PARCIAL"
     arquivo = destino / f"monitoramento_{date}{sufixo}.xlsx"
     _build_xlsx(arquivo, date, todos, blocos_total, blocos_falha)
@@ -354,6 +519,17 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False):
         print(f"[ATENCAO] relatorio PARCIAL ({blocos_falha}/{blocos_total} blocos falharam na IA). "
               f"NAO sobrescreveu o relatorio canonico; salvo como -> {arquivo}. "
               "Regenere quando a IA normalizar.")
+
+    # Grava no Oracle (002A) só quando a rodada foi COMPLETA (evita dados parciais).
+    if completo:
+        if oracle_db.configurado() and config.oracle_settings().get("table_monitor"):
+            try:
+                n = oracle_db.salvar_monitoramento(date, todos)
+                print(f"[ok] {n} itens gravados no Oracle (002A) para a edicao {date}.")
+            except Exception as e:  # noqa: BLE001 - nao derruba o job por falha de banco
+                print(f"[ATENCAO] falha ao gravar no Oracle (002A): {type(e).__name__}: {str(e)[:200]}")
+        else:
+            print("[monitor] Oracle/002A nao configurado -> gravado so o Excel.")
     return arquivo
 
 
@@ -413,8 +589,11 @@ def main():
     ap.add_argument("--chunk", type=int, default=4, help="Paginas por chamada de IA (padrao: 4)")
     ap.add_argument("--todas-paginas", action="store_true",
                     help="Desliga o pre-filtro SEFAZ e manda TODAS as paginas a IA (mais caro)")
+    ap.add_argument("--force", action="store_true",
+                    help="Reprocessa mesmo se o Excel canonico do dia ja existir (gasta IA)")
     args = ap.parse_args()
-    gerar(date=args.date, destino=args.dir, chunk=args.chunk, todas_paginas=args.todas_paginas)
+    gerar(date=args.date, destino=args.dir, chunk=args.chunk,
+          todas_paginas=args.todas_paginas, force=args.force)
 
 
 if __name__ == "__main__":

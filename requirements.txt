@@ -15,7 +15,15 @@ python-dotenv>=1.0    # lê as chaves do .env
 Flask>=3.0            # servidor web local
 markdown>=3.5         # renderiza a resposta (Markdown -> HTML) no front
 
+# === Relatorios (Excel do monitor/exoneracoes e PDF do site) ===
+xlsxwriter>=3.2       # .xlsx (export.py e monitor_estruturado.py)
+reportlab>=4.0        # .pdf (export.py)
+
 # === Gravação no Oracle (job de atos de pessoal -> DOERJ_ATOS_PESSOAL) ===
 oracledb>=2.0         # driver Oracle em modo thin (não precisa do Oracle Client)
 
 # Obs.: a busca usa o SQLite FTS5, que já vem embutido no Python (sem dependência).
+#
+# Este arquivo é a lista LEGÍVEL (o que e por quê). Para instalar em produção use
+# o requirements.lock.txt, que tem as versões exatas do ambiente homologado —
+# `deploy\instalar.bat` já faz isso.

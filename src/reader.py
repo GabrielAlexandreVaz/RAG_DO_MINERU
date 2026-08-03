@@ -188,6 +188,31 @@ def _resumo_ia(itens, edicao):
     return _resumo_itens(itens, edicao), {"input": 0, "output": 0}
 
 
+def _answer_com_retry(question, bloco, max_tokens, tentativas=5):
+    """answer_from_pages com repetição em falha transitória. Devolve (data, usage).
+
+    A rede da SEFAZ derruba conexão no meio da resposta de vez em quando: em
+    03/08/2026 um `httpx.RemoteProtocolError` (peer closed connection) na etapa de
+    atos de pessoal parou o pipeline inteiro às 08:05, e a edição só foi gravada na
+    rodada das 09:05. O monitor já tinha essa proteção; esta etapa não tinha.
+
+    Espera 5s, 10s, 20s e 40s entre as tentativas. Esgotadas, RELEVANTA o erro: a
+    etapa falha por inteiro e nada parcial vai para a 001A (metade dos atos gravados
+    em silêncio seria pior que a etapa quebrada)."""
+    import time
+    for tentativa in range(1, tentativas + 1):
+        try:
+            return answer_from_pages(question, bloco, max_tokens=max_tokens)
+        except Exception as e:  # noqa: BLE001 - qualquer falha da IA/rede merece retry
+            # Chave ausente não é transitório: repetir 5x só atrasaria o erro.
+            if "ANTHROPIC_API_KEY" in str(e) or tentativa == tentativas:
+                raise
+            espera = min(60, 5 * (2 ** (tentativa - 1)))       # 5, 10, 20, 40s
+            print(f"[reader] [retry {tentativa}/{tentativas}] falha na IA "
+                  f"({type(e).__name__}); aguardando {espera}s...", flush=True)
+            time.sleep(espera)
+
+
 def answer_chunked(question, results, chunk_size=2, max_tokens=16000):
     """Como answer_from_pages, mas processa as páginas em BLOCOS e junta os itens.
 
@@ -199,7 +224,7 @@ def answer_chunked(question, results, chunk_size=2, max_tokens=16000):
     uin = uout = 0
     for i in range(0, len(results), chunk_size):
         bloco = results[i:i + chunk_size]
-        data, usage = answer_from_pages(question, bloco, max_tokens=max_tokens)
+        data, usage = _answer_com_retry(question, bloco, max_tokens)
         itens.extend(data.get("itens", []))
         uin += usage["input"]
         uout += usage["output"]

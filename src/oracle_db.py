@@ -330,14 +330,47 @@ def ja_gravado_monitor(edicao_iso):
         con.close()
 
 
+def listar_monitoramento(edicao_iso):
+    """Lê de volta as linhas da 002A de UMA edição -> [{coluna: valor}], ordenadas.
+
+    Existe para o resumo executivo nascer do BANCO, e não do Excel local: a área
+    demandante valida a 002A, então é ela a fonte da verdade. ID vem junto porque
+    é a chave da matriz de rastreabilidade (cada item do resumo cita os IDs que o
+    sustentam)."""
+    cols = ["ID", "TIPO", "TIPO_ATO", "NUMERO_ANO", "ORGAO", "PESSOA", "CARGO",
+            "PROCESSO", "VIGENCIA", "RESUMO", "CADERNO", "PAGINA", "DATA_EDICAO",
+            "DATA_ATO", "PRAZO"]
+    con = get_connection()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            f"SELECT {', '.join(cols)} FROM {_tabela_monitor()} "
+            "WHERE DATA_EDICAO = :ed ORDER BY TIPO, PAGINA, ID",
+            {"ed": _to_date(edicao_iso)},
+        )
+        return [dict(zip(cols, linha)) for linha in cur.fetchall()]
+    finally:
+        con.close()
+
+
 def salvar_monitoramento(edicao_iso, itens, categoria_secao=None):
     """Grava os itens do monitor na tabela ÚNICA 002A. Idempotente por DATA_EDICAO
     (DELETE da edição + INSERT). `TIPO` recebe a categoria técnica do item.
     Devolve o nº de linhas inseridas. (`categoria_secao` mantido só por compat.)"""
     alvo = _tabela_monitor()
     edicao_date = _to_date(edicao_iso)
+    # ID gerado aqui: a tabela nao tem sequence nem identity, e ate 03/08/2026 toda
+    # linha da 002A estava com ID nulo. Sem chave nao ha como o resumo executivo
+    # apontar quais registros sustentam cada item (a matriz de rastreabilidade que a
+    # area demandante pediu). Formato AAAAMMDD9999: legivel, unico entre edicoes e
+    # estavel dentro da edicao. Reprocessar a edicao renumera - o que e coerente com
+    # o DELETE+INSERT, que ja troca as linhas por outras.
+    base_id = int(edicao_date.strftime("%Y%m%d")) * 10000
+    if len(itens) > 9999:                        # nunca chegou perto (76 no maior dia)
+        raise ValueError(f"{len(itens)} itens numa edicao estoura a faixa de ID reservada")
     linhas = [
         {
+            "id": base_id + i,
             "tipo": _trunc((it.get("categoria") or "").strip().upper(), _LIM_002["TIPO"]),
             "tipo_ato": _trunc(it.get("tipo_ato"), _LIM_002["TIPO_ATO"]),
             "numero_ano": _trunc(it.get("numero_ano"), _LIM_002["NUMERO_ANO"]),
@@ -353,7 +386,7 @@ def salvar_monitoramento(edicao_iso, itens, categoria_secao=None):
             "prazo": _to_date(it.get("prazo")),
             "pagina": _pagina_num(it.get("pagina")),
         }
-        for it in itens
+        for i, it in enumerate(itens, start=1)
     ]
 
     con = get_connection()
@@ -362,9 +395,9 @@ def salvar_monitoramento(edicao_iso, itens, categoria_secao=None):
         cur.execute(f"DELETE FROM {alvo} WHERE DATA_EDICAO = :ed", {"ed": edicao_date})
         if linhas:
             cur.executemany(
-                f"INSERT INTO {alvo} (TIPO, TIPO_ATO, NUMERO_ANO, ORGAO, PESSOA, CARGO, "
+                f"INSERT INTO {alvo} (ID, TIPO, TIPO_ATO, NUMERO_ANO, ORGAO, PESSOA, CARGO, "
                 "PROCESSO, VIGENCIA, RESUMO, CADERNO, DATA_EDICAO, DATA_ATO, PRAZO, PAGINA) "
-                "VALUES (:tipo, :tipo_ato, :numero_ano, :orgao, :pessoa, :cargo, "
+                "VALUES (:id, :tipo, :tipo_ato, :numero_ano, :orgao, :pessoa, :cargo, "
                 ":processo, :vigencia, :resumo, :caderno, :data_edicao, :data_ato, :prazo, :pagina)",
                 linhas,
             )

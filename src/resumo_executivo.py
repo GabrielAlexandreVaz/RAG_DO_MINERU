@@ -8,7 +8,8 @@ Lê as linhas que o monitor gravou no Oracle (002A) e produz:
      no formato do e-mail que a área demandante já recebe;
   2. resumo_executivo_<data>.txt   - o mesmo conteúdo em texto puro;
   3. rastreabilidade_<data>.xlsx   - a MATRIZ DE RASTREABILIDADE: cada item do
-     resumo com os IDs dos registros da 002A que o sustentam.
+     resumo apontando os registros da 002A que o sustentam (por pessoa,
+     processo e página — as colunas de negócio, não um ID sintético).
 
 Por que assim: a validação da área (31/07/2026) deixou de exigir paridade de
 linhas e passou a exigir que todo item executivo seja explicável por registros
@@ -143,6 +144,36 @@ def _local(itens):
     return f" ({'; '.join(partes)})" if partes else ""
 
 
+def _referencia(registros, lim=3):
+    """'MANOEL ANTONIO BENTO · SEI-040002/002011/2026 · Parte I, p. 59'.
+
+    É a âncora do item no banco. Usa as colunas de NEGÓCIO (pessoa, processo,
+    página) em vez de um ID sintético: identificam 94% dos registros, e é assim
+    que a área validou ('validar por pessoa + processo + tipo de ato'). A coluna
+    ID da 002A está nula — ver oracle_db.salvar_monitoramento."""
+    def distintos(chave):
+        vistos, saida = set(), []
+        for r in registros:
+            v = _txt(r, chave)
+            if v and _norm(v) not in vistos:
+                vistos.add(_norm(v))
+                saida.append(v)
+        return saida
+
+    partes = []
+    for chave in ("PESSOA", "PROCESSO"):
+        vals = distintos(chave)
+        if vals:
+            texto = "; ".join(vals[:lim])
+            if len(vals) > lim:
+                texto += f" (+{len(vals) - lim})"
+            partes.append(texto)
+    local = _local(registros).strip(" ()")
+    if local:
+        partes.append(local)
+    return " · ".join(partes)
+
+
 def _texto_item_unico(secao, it):
     """Redação de um item que corresponde a UM registro da 002A."""
     tipo = _txt(it, "TIPO_ATO") or "Ato"
@@ -270,10 +301,11 @@ def gerar_html(date, itens_por_secao, registros):
             continue
         p.append("<ul>")
         for it in itens:
-            ids = ", ".join(str(r["ID"]) for r in it["registros"] if r.get("ID") is not None)
-            local = _local(it["registros"])
-            p.append(f'<li>{e(it["texto"])}{e(local)}'
-                     f'<br><span class="ids">002A: {e(ids)}</span></li>')
+            ref = _referencia(it["registros"])
+            n = len(it["registros"])
+            origem = f"{n} registros da 002A" if n > 1 else "002A"
+            p.append(f'<li>{e(it["texto"])}'
+                     f'<br><span class="ids">{e(origem)} &middot; {e(ref)}</span></li>')
         p.append("</ul>")
 
     p.append("<h2>Resumo por caderno</h2><table><tr><th>Caderno</th><th>Registros</th></tr>")
@@ -283,7 +315,8 @@ def gerar_html(date, itens_por_secao, registros):
     total_itens = sum(len(v) for v in itens_por_secao.values())
     p.append(f'<div class="rodape">Gerado a partir da tabela 002A (Oracle): '
              f'{len(registros)} registros estruturados consolidados em {total_itens} itens de '
-             f'leitura. Cada item cita os IDs que o sustentam - toda linha da base aparece em '
+             f'leitura. Cada item aponta pessoa, processo e pagina dos registros que o '
+             f'sustentam - toda linha da base aparece em '
              f'algum item, e nenhum item existe sem registro. Fonte: DOERJ, varredura dos cinco '
              f'cadernos.</div></body></html>')
     return "\n".join(p)
@@ -308,8 +341,10 @@ def gerar_txt(date, itens_por_secao, registros):
             linhas += [f"  {VAZIO[n]}", ""]
             continue
         for it in itens:
-            ids = ", ".join(str(r["ID"]) for r in it["registros"] if r.get("ID") is not None)
-            linhas.append(f"  - {it['texto']}{_local(it['registros'])}  [002A: {ids}]")
+            n = len(it["registros"])
+            origem = f"{n} registros" if n > 1 else "1 registro"
+            linhas.append(f"  - {it['texto']}")
+            linhas.append(f"      [{origem} da 002A · {_referencia(it['registros'])}]")
         linhas.append("")
     linhas.append("RESUMO POR CADERNO")
     for cad, qtd in _resumo_por_caderno(registros):
@@ -327,10 +362,16 @@ def gerar_matriz(arquivo, date, itens_por_secao, registros):
     f_tit = wb.add_format({"bold": True, "font_size": 13})
 
     ws = wb.add_worksheet("Rastreabilidade")
-    cabec = ["Secao", "Item executivo", "Registros", "IDs na 002A", "Cadernos",
-             "Paginas", "Processos"]
+    # As colunas de conferencia sao as de NEGOCIO (pessoa, processo, tipo do ato,
+    # caderno, pagina) - o criterio que a area propos na validacao de 31/07.
+    cabec = ["Secao", "Item executivo", "Registros", "Pessoas", "Processos",
+             "Tipos de ato", "Cadernos", "Paginas"]
     for c, t in enumerate(cabec):
         ws.write_string(0, c, t, f_hdr)
+
+    def juntar(regs, chave, lim=900):
+        return "; ".join(sorted({_txt(r, chave) for r in regs if _txt(r, chave)}))[:lim]
+
     li = 1
     for n in SECOES:
         for it in itens_por_secao.get(n, []):
@@ -338,16 +379,14 @@ def gerar_matriz(arquivo, date, itens_por_secao, registros):
             ws.write_string(li, 0, SECOES[n], f_cel)
             ws.write_string(li, 1, it["texto"], f_cel)
             ws.write_number(li, 2, len(regs), f_cel)
-            ws.write_string(li, 3, ", ".join(str(r["ID"]) for r in regs
-                                             if r.get("ID") is not None), f_cel)
-            ws.write_string(li, 4, "; ".join(sorted({_txt(r, "CADERNO") for r in regs
-                                                     if _txt(r, "CADERNO")})), f_cel)
-            ws.write_string(li, 5, ", ".join(str(int(r["PAGINA"])) for r in regs
+            ws.write_string(li, 3, juntar(regs, "PESSOA"), f_cel)
+            ws.write_string(li, 4, juntar(regs, "PROCESSO"), f_cel)
+            ws.write_string(li, 5, juntar(regs, "TIPO_ATO", 300), f_cel)
+            ws.write_string(li, 6, juntar(regs, "CADERNO"), f_cel)
+            ws.write_string(li, 7, ", ".join(str(int(r["PAGINA"])) for r in regs
                                              if r.get("PAGINA") is not None), f_cel)
-            ws.write_string(li, 6, "; ".join(sorted({_txt(r, "PROCESSO") for r in regs
-                                                     if _txt(r, "PROCESSO")}))[:900], f_cel)
             li += 1
-    for c, w in enumerate([32, 96, 11, 26, 26, 14, 40]):
+    for c, w in enumerate([32, 88, 11, 34, 34, 26, 24, 14]):
         ws.set_column(c, c, w)
     ws.freeze_panes(1, 0)
     if li > 1:

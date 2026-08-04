@@ -183,7 +183,11 @@ SYSTEM = (
     "MENSAGENS DE VETO a dispositivos com impacto fazendario (gere um item PROPRIO para o veto, "
     "SEPARADO da lei sancionada, citando os artigos vetados e o motivo do veto), resolucoes, "
     "portarias de superintendencia, atas de colegiado, Conselho de Contribuintes, termos "
-    "aditivos, cancelamento de IE, instituicao de comissao.\n"
+    "aditivos, cancelamento de IE, instituicao de comissao, DESPACHOS do Representante da "
+    "Fazenda (ex.: declaracao de identidade parcial entre litigio administrativo e judicial de "
+    "um contribuinte - gere UM item por despacho, citando o contribuinte e o tema tributario) e "
+    "DELEGACAO de competencia ou de poderes a autoridade/servidor (delegar nao e movimentacao "
+    "de pessoal: o servidor nao muda de cargo, so recebe atribuicao - vai aqui).\n"
     "- DESTAQUE_CONTROLE_INTERNO: Controle Interno, Corregedoria Tributaria (CTCE), Auditoria "
     "Interna/AGE com vinculo SEFAZ, Tomada de Contas Especial da SEFAZ.\n"
     "- EXPEDIENTE_PONTO_FACULTATIVO: ponto facultativo/expediente/feriado/recesso estadual.\n"
@@ -504,9 +508,13 @@ _MESES = {"janeiro": 1, "fevereiro": 2, "marco": 3, "abril": 4, "maio": 5, "junh
           "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11,
           "dezembro": 12}
 
+# O cabecalho varia: "Pauta de Julgamento" (o comum), "Pauta Aditiva de Julgamento"
+# (04/08/2026, que passou batido), "PAUTA PARA JULGAMENTO" e "PAUTA DE CONTINUACAO
+# DE JULGAMENTO". Aceita ate 3 palavras entre "Pauta" e "Julgamento".
 _RX_PAUTA = re.compile(
-    r"Pauta de Julgamento[^\n]{0,120}?do dia\s+(\d{1,2})\s+de\s+([A-Za-zÀ-ÿ]+)\s+de\s+(\d{4})"
-    r"\s*,?\s*(?:[àa]s\s+(\d{1,2})\s*(?:h|horas))?",
+    r"Pauta(?:\s+[A-Za-zÀ-ÿ]+){0,3}\s+Julgamento"
+    r"[^\n]{0,120}?do dia\s+(\d{1,2})\s+de\s+([A-Za-zÀ-ÿ]+)\s+de\s+(\d{4})"
+    r"\s*,?\s*(?:[àa]s\s+(\d{1,2})\s*(?:h|horas)\s*(\d{2})?\s*(?:min)?)?",
     re.IGNORECASE)
 _RX_CAMARA = re.compile(
     r"(?:PRIMEIRA|SEGUNDA|TERCEIRA|QUARTA|QUINTA|SEXTA)\s+C[ÂA]MARA"
@@ -587,7 +595,9 @@ def _scan_pautas(date):
             if not mes:
                 continue
             data_sessao = f"{int(m.group(1)):02d}/{mes:02d}/{m.group(3)}"
-            hora = f"{int(m.group(4))}h" if m.group(4) else ""
+            # 'as 14h' ou 'as 14h30min' - o horario faz parte da conferencia do prazo.
+            hora = f"{int(m.group(4))}h{m.group(5)}" if m.group(4) and m.group(5) \
+                else (f"{int(m.group(4))}h" if m.group(4) else "")
             cam = _RX_CAMARA.search(antes)
             camara = " ".join(cam.group(0).split()).title() if cam else "Conselho de Contribuintes"
             chave = (data_sessao, hora, _norm(camara))

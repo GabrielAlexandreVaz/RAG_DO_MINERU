@@ -8,8 +8,8 @@ Lê as linhas que o monitor gravou no Oracle (002A) e produz:
      no formato do e-mail que a área demandante já recebe;
   2. resumo_executivo_<data>.txt   - o mesmo conteúdo em texto puro;
   3. rastreabilidade_<data>.xlsx   - a MATRIZ DE RASTREABILIDADE: cada item do
-     resumo apontando os registros da 002A que o sustentam (por pessoa,
-     processo e página — as colunas de negócio, não um ID sintético).
+     resumo com os registros que o sustentam — ID (nosso), ID_DOERJ (a matéria
+     no IOERJ) e as colunas de negócio (pessoa, processo, caderno, página).
 
 Por que assim: a validação da área (31/07/2026) deixou de exigir paridade de
 linhas e passou a exigir que todo item executivo seja explicável por registros
@@ -147,10 +147,11 @@ def _local(itens):
 def _referencia(registros, lim=3):
     """'MANOEL ANTONIO BENTO · SEI-040002/002011/2026 · Parte I, p. 59'.
 
-    É a âncora do item no banco. Usa as colunas de NEGÓCIO (pessoa, processo,
-    página) em vez de um ID sintético: identificam 94% dos registros, e é assim
-    que a área validou ('validar por pessoa + processo + tipo de ato'). A coluna
-    ID da 002A está nula — ver oracle_db.salvar_monitoramento."""
+    É a âncora do item no banco. No texto do resumo usamos as colunas de NEGÓCIO
+    (pessoa, processo, página), que é como a área pediu para conferir ('validar
+    por pessoa + processo + tipo de ato') e o que uma pessoa consegue ler. Os
+    identificadores — ID (nosso) e ID_DOERJ (da matéria no IOERJ) — ficam na
+    matriz de rastreabilidade, para quem for cruzar com o banco ou com o D.O."""
     def distintos(chave):
         vistos, saida = set(), []
         for r in registros:
@@ -364,8 +365,8 @@ def gerar_matriz(arquivo, date, itens_por_secao, registros):
     ws = wb.add_worksheet("Rastreabilidade")
     # As colunas de conferencia sao as de NEGOCIO (pessoa, processo, tipo do ato,
     # caderno, pagina) - o criterio que a area propos na validacao de 31/07.
-    cabec = ["Secao", "Item executivo", "Registros", "Pessoas", "Processos",
-             "Tipos de ato", "Cadernos", "Paginas"]
+    cabec = ["Secao", "Item executivo", "Registros", "IDs (002A)", "Ids no DOERJ",
+             "Pessoas", "Processos", "Tipos de ato", "Cadernos", "Paginas"]
     for c, t in enumerate(cabec):
         ws.write_string(0, c, t, f_hdr)
 
@@ -379,14 +380,18 @@ def gerar_matriz(arquivo, date, itens_por_secao, registros):
             ws.write_string(li, 0, SECOES[n], f_cel)
             ws.write_string(li, 1, it["texto"], f_cel)
             ws.write_number(li, 2, len(regs), f_cel)
-            ws.write_string(li, 3, juntar(regs, "PESSOA"), f_cel)
-            ws.write_string(li, 4, juntar(regs, "PROCESSO"), f_cel)
-            ws.write_string(li, 5, juntar(regs, "TIPO_ATO", 300), f_cel)
-            ws.write_string(li, 6, juntar(regs, "CADERNO"), f_cel)
-            ws.write_string(li, 7, ", ".join(str(int(r["PAGINA"])) for r in regs
+            ws.write_string(li, 3, ", ".join(str(r["ID"]) for r in regs
+                                             if r.get("ID") is not None), f_cel)
+            ws.write_string(li, 4, ", ".join(sorted({str(r["ID_DOERJ"]) for r in regs
+                                                     if r.get("ID_DOERJ") is not None})), f_cel)
+            ws.write_string(li, 5, juntar(regs, "PESSOA"), f_cel)
+            ws.write_string(li, 6, juntar(regs, "PROCESSO"), f_cel)
+            ws.write_string(li, 7, juntar(regs, "TIPO_ATO", 300), f_cel)
+            ws.write_string(li, 8, juntar(regs, "CADERNO"), f_cel)
+            ws.write_string(li, 9, ", ".join(str(int(r["PAGINA"])) for r in regs
                                              if r.get("PAGINA") is not None), f_cel)
             li += 1
-    for c, w in enumerate([32, 88, 11, 34, 34, 26, 24, 14]):
+    for c, w in enumerate([32, 76, 11, 30, 24, 30, 32, 24, 22, 12]):
         ws.set_column(c, c, w)
     ws.freeze_panes(1, 0)
     if li > 1:

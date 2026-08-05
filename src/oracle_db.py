@@ -317,6 +317,12 @@ def _pagina_num(valor):
     return int(m.group()) if m else None
 
 
+def _so_numero(valor):
+    """Valor inteiro ou None (ID_DOERJ é NUMBER; o casamento pode não achar a matéria)."""
+    m = re.fullmatch(r"\s*(\d{1,12})\s*", str(valor or ""))
+    return int(m.group(1)) if m else None
+
+
 def ja_gravado_monitor(edicao_iso):
     """True se a 002A já tem linhas desta edição (trava de custo no pipeline)."""
     alvo = _tabela_monitor()
@@ -337,7 +343,7 @@ def listar_monitoramento(edicao_iso):
     demandante valida a 002A, então é ela a fonte da verdade. ID vem no SELECT, mas
     hoje é sempre nulo (ver salvar_monitoramento): a rastreabilidade do resumo é
     feita por PESSOA + PROCESSO + PAGINA."""
-    cols = ["ID", "TIPO", "TIPO_ATO", "NUMERO_ANO", "ORGAO", "PESSOA", "CARGO",
+    cols = ["ID", "ID_DOERJ", "TIPO", "TIPO_ATO", "NUMERO_ANO", "ORGAO", "PESSOA", "CARGO",
             "PROCESSO", "VIGENCIA", "RESUMO", "CADERNO", "PAGINA", "DATA_EDICAO",
             "DATA_ATO", "PRAZO"]
     con = get_connection()
@@ -359,18 +365,20 @@ def salvar_monitoramento(edicao_iso, itens, categoria_secao=None):
     Devolve o nº de linhas inseridas. (`categoria_secao` mantido só por compat.)"""
     alvo = _tabela_monitor()
     edicao_date = _to_date(edicao_iso)
-    # ID fica NULO de proposito (03/08/2026). A tabela nao tem sequence nem identity,
-    # e chegamos a preencher um numero nosso (AAAAMMDD9999) para o resumo executivo
-    # citar. Foi descartado: a rastreabilidade que a area pediu se resolve com as
-    # colunas de negocio que ja existem - PESSOA + PROCESSO + PAGINA identificam 94%
-    # dos registros -, e um numero sintetico nao diz nada a quem le o relatorio.
-    # A ideia em avaliacao para esta coluna e outra: guardar o "Id: NNNNNNN" que o
-    # proprio DOERJ publica no fim de cada materia, que leva a publicacao oficial.
-    # Ele ainda nao serve: identifica a MATERIA, nao a linha (uma portaria vira 3
-    # registros nossos), e so conseguimos casar 59% dos registros com ele. Enquanto
-    # nao houver decisao, nao inventamos chave.
+    # ID: chave NOSSA, para localizar a linha (a tabela nao tem sequence nem
+    # identity, e ate 04/08/2026 a coluna estava nula em todas as linhas). Formato
+    # AAAAMMDD9999 - legivel, unico entre edicoes, estavel dentro da edicao.
+    # Reprocessar a edicao renumera, o que e coerente com o DELETE+INSERT.
+    # Nao confundir com o Id do proprio DOERJ (o "Id: NNNNNNN" no fim de cada
+    # materia): esse identifica a MATERIA publicada, se repete quando uma materia
+    # vira varios registros nossos, e por isso vai em coluna propria.
+    base_id = int(edicao_date.strftime("%Y%m%d")) * 10000
+    if len(itens) > 9999:                        # nunca chegou perto (76 no maior dia)
+        raise ValueError(f"{len(itens)} itens numa edicao estoura a faixa de ID reservada")
     linhas = [
         {
+            "id": base_id + i,
+            "id_doerj": _so_numero(it.get("id_doerj")),
             "tipo": _trunc((it.get("categoria") or "").strip().upper(), _LIM_002["TIPO"]),
             "tipo_ato": _trunc(it.get("tipo_ato"), _LIM_002["TIPO_ATO"]),
             "numero_ano": _trunc(it.get("numero_ano"), _LIM_002["NUMERO_ANO"]),
@@ -386,7 +394,7 @@ def salvar_monitoramento(edicao_iso, itens, categoria_secao=None):
             "prazo": _to_date(it.get("prazo")),
             "pagina": _pagina_num(it.get("pagina")),
         }
-        for it in itens
+        for i, it in enumerate(itens, start=1)
     ]
 
     con = get_connection()
@@ -395,9 +403,9 @@ def salvar_monitoramento(edicao_iso, itens, categoria_secao=None):
         cur.execute(f"DELETE FROM {alvo} WHERE DATA_EDICAO = :ed", {"ed": edicao_date})
         if linhas:
             cur.executemany(
-                f"INSERT INTO {alvo} (TIPO, TIPO_ATO, NUMERO_ANO, ORGAO, PESSOA, CARGO, "
-                "PROCESSO, VIGENCIA, RESUMO, CADERNO, DATA_EDICAO, DATA_ATO, PRAZO, PAGINA) "
-                "VALUES (:tipo, :tipo_ato, :numero_ano, :orgao, :pessoa, :cargo, "
+                f"INSERT INTO {alvo} (ID, ID_DOERJ, TIPO, TIPO_ATO, NUMERO_ANO, ORGAO, PESSOA, "
+                "CARGO, PROCESSO, VIGENCIA, RESUMO, CADERNO, DATA_EDICAO, DATA_ATO, PRAZO, PAGINA) "
+                "VALUES (:id, :id_doerj, :tipo, :tipo_ato, :numero_ano, :orgao, :pessoa, :cargo, "
                 ":processo, :vigencia, :resumo, :caderno, :data_edicao, :data_ato, :prazo, :pagina)",
                 linhas,
             )

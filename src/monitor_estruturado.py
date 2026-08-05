@@ -681,6 +681,76 @@ def _calcular_prazos(itens, date):
     return calculados, uteis
 
 
+# --------------------------------------------------------------------------
+# Id do próprio DOERJ (coluna ID_DOERJ da 002A)
+# --------------------------------------------------------------------------
+# O IOERJ fecha cada matéria publicada com "Id: 2753789". Guardar esse número
+# liga o nosso registro à PUBLICAÇÃO OFICIAL — quem contesta um item do relatório
+# chega no D.O. sem procurar página por página. Não confundir com a coluna ID,
+# que é nossa: o Id do IOERJ identifica a MATÉRIA e se repete quando uma matéria
+# vira vários registros (a Portaria JRF nº 182 virou 3 linhas em 03/08/2026).
+#
+# Como casamos: procuramos uma âncora do item (o nº do processo resolve 165 dos
+# 178 casos) no texto da edição e pegamos o primeiro "Id:" DEPOIS dela — que é o
+# fecho daquela matéria. Medido em 4 edições (208 registros): 85% casam. Os 15%
+# restantes são registros sem processo, sem número e sem pessoa (anexos de
+# decreto, avisos genéricos) — ficam nulos, e tudo bem.
+_RX_ID_DOERJ = re.compile(r"Id:\s*(\d+)")
+_MIN_ANCORA = 10                      # âncora curta casaria em qualquer lugar
+
+
+def _so_alnum(s):
+    """Só letras e dígitos — o D.O. quebra 'SEI-040006/033029/2026' com espaços e hífens."""
+    return re.sub(r"[^0-9a-zA-Z]", "", s or "")
+
+
+def _indice_edicao(date):
+    """(texto colado da edição, versão só-alfanumérica, mapa de posições).
+
+    O mapa liga cada caractere alfanumérico à sua posição no texto original, para
+    a busca ignorar pontuação/quebras e ainda assim achar o offset real."""
+    con = sqlite3.connect(config.DB_PATH)
+    try:
+        partes = [t or "" for (t,) in con.execute(
+            "SELECT content FROM pages WHERE date=? ORDER BY caderno, page", (date,))]
+    finally:
+        con.close()
+    texto = "\n".join(partes)
+    plano, buf = [], []
+    for i, ch in enumerate(texto):
+        if ch.isalnum():
+            buf.append(ch)
+            plano.append(i)
+    return texto, "".join(buf), plano
+
+
+def _casar_id_doerj(itens, date):
+    """Preenche 'id_doerj' em cada item. Devolve o nº de itens casados."""
+    texto, plano_txt, plano = _indice_edicao(date)
+    if not texto:
+        return 0
+    casados = 0
+    for it in itens:
+        achado = None
+        for campo in ("processo", "numero_ano", "pessoa", "resumo"):
+            for pedaco in re.split(r"[;,]", str(it.get(campo) or ""))[:4]:
+                chave = _so_alnum(pedaco)
+                if len(chave) < _MIN_ANCORA:
+                    continue
+                j = plano_txt.find(chave)
+                if j < 0:
+                    continue
+                m = _RX_ID_DOERJ.search(texto, plano[j])
+                if m:
+                    achado = m.group(1)
+                    break
+            if achado:
+                break
+        it["id_doerj"] = achado
+        casados += 1 if achado else 0
+    return casados
+
+
 def _extrair_json(resp):
     """Extrai o objeto JSON da resposta da IA, tolerando o que ela costuma acrescentar.
 
@@ -858,6 +928,10 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     n_corr = _forcar_categoria_por_caderno(todos)
     if n_corr:
         print(f"[monitor] {n_corr} item(ns) reclassificado(s) pela secao do proprio caderno.")
+
+    # Id da matéria no DOERJ: liga o registro à publicação oficial.
+    n_id = _casar_id_doerj(todos, date)
+    print(f"[monitor] Id do DOERJ: {n_id}/{len(todos)} registro(s) casado(s) com a materia")
     print(f"[monitor] lista de monitorados: {n_vigentes} nome(s) vigente(s) em {date} "
           f"(fonte: {origem})")
     if monit:

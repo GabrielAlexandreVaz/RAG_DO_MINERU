@@ -28,9 +28,9 @@ import config
 import oracle_db
 from monitor_estruturado import CATEGORIA_SECAO, SECOES
 
-COLUNAS = ["ID", "TIPO", "TIPO_ATO", "NUMERO_ANO", "ORGAO", "PESSOA", "CARGO", "PROCESSO",
+COLUNAS = ["ID", "ID_DOERJ", "TIPO", "TIPO_ATO", "NUMERO_ANO", "ORGAO", "PESSOA", "CARGO", "PROCESSO",
            "VIGENCIA", "RESUMO", "CADERNO", "PAGINA", "DATA_EDICAO", "DATA_ATO", "PRAZO"]
-LARGURAS = [14, 26, 24, 22, 26, 30, 26, 26, 18, 70, 24, 8, 12, 12, 12, 12]
+LARGURAS = [14, 14, 26, 24, 22, 26, 30, 26, 26, 18, 70, 24, 8, 12, 12, 12, 12]
 
 
 def _secao(tipo):
@@ -81,7 +81,7 @@ def gerar(date=None, destino=None):
             v = r.get(col)
             if hasattr(v, "year"):                       # DATE do Oracle
                 ws.write_datetime(li, c, v, f_dat)
-            elif isinstance(v, (int, float)) and col in ("ID", "PAGINA"):
+            elif isinstance(v, (int, float)) and col in ("ID", "ID_DOERJ", "PAGINA"):
                 ws.write_number(li, c, v, f_cel)
             else:
                 # write_string sempre: texto que parece numero ou comeca com '='

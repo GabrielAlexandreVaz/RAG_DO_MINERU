@@ -29,9 +29,8 @@ data/
 logs/
 # prints de falha do download
 screenshots/
-# Excel do monitor estruturado e das exonerações
+# Excel do monitor estruturado
 relatorios/
-exoneracoes/
 
 # --- Arquivos avulsos de teste ---
 _pag3.png

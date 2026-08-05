@@ -155,6 +155,10 @@ def extrair(pdf, saida=None):
 
 
 def main():
+    """Linha de comando: extrai um PDF específico ou todos os pendentes da pasta.
+
+    Sem argumento, varre DOWNLOADS_DIR e pula o que já tem content_list.json —
+    reextrair é caro (é o passo mais lento do pipeline)."""
     ap = argparse.ArgumentParser(description="Extrai o texto dos PDFs do DOERJ com MinerU (em fatias).")
     ap.add_argument("pdf", nargs="?", default=None, help="PDF especifico (opcional)")
     ap.add_argument("--force", action="store_true", help="Reextrai mesmo se ja existir")

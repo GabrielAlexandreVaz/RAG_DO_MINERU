@@ -30,6 +30,11 @@ INDEX_HTML = config.ROOT / "web" / "index.html"
 
 @app.after_request
 def _no_cache(resp):
+    """Impede o navegador de cachear a página e as respostas da API.
+
+    As imagens de página (/api/page) ficam de fora e mantêm o cache de 1 dia:
+    são caras de renderizar e não mudam. Sem isto, o front mostraria a resposta
+    de uma pergunta anterior ao voltar na navegação."""
     if request.path == "/" or request.path.startswith("/api/"):
         resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -44,16 +49,28 @@ def _safe_pdf(name):
 
 @app.get("/")
 def index():
+    """Serve o front-end (página única). Lido do disco a cada acesso, para
+    editar o HTML sem reiniciar o servidor."""
     return Response(INDEX_HTML.read_text(encoding="utf-8"), mimetype="text/html")
 
 
 @app.get("/assets/<path:fn>")
 def assets(fn):
+    """Serve as imagens de web/assets (o brasão). Path(fn).name descarta
+    qualquer diretório no pedido, evitando sair da pasta."""
     return send_from_directory(config.ROOT / "web" / "assets", Path(fn).name)
 
 
 @app.get("/api/page")
 def page_image():
+    """Renderiza UMA página do PDF em PNG, com marca-texto opcional.
+
+    É a conferência visual: o usuário vê a página original com o termo buscado
+    destacado em amarelo, exatamente sobre o texto. Parâmetros: `pdf` (só o nome
+    do arquivo), `page`, `dpi` e `hl` (termos a destacar).
+
+    Só funciona para a Parte I, a única com PDF salvo em disco — os cadernos
+    leves são indexados em memória. Daí o 404 quando não há arquivo."""
     pdf = request.args.get("pdf", "")
     try:
         page = int(request.args.get("page", "1"))
@@ -75,12 +92,28 @@ def page_image():
 
 @app.get("/api/dates")
 def api_dates():
+    """Edições disponíveis no índice, para o seletor de data do front."""
     dates = list_dates()
     return jsonify({"dates": dates, "latest": dates[0] if dates else None})
 
 
 @app.post("/api/ask")
 def api_ask():
+    """A rota principal: pergunta em português -> busca -> resposta estruturada.
+
+    Fluxo:
+      1. ESCOPO — usa a data escolhida no front; "all" busca em tudo; senão tenta
+         ler uma data citada na própria pergunta e cai na edição mais recente.
+      2. BUSCA — normal traz as top-k páginas por relevância (BM25). Com
+         `full=True` (os atalhos: Exonerações, Nomeações...) traz TODAS as páginas
+         do tema, porque esses temas se espalham por muitas páginas e o top-k
+         perderia itens.
+      3. LEITURA — a IA devolve {resumo, itens}. Em modo `full` vai em blocos de
+         2 páginas para o JSON não truncar.
+
+    `search_only` para na etapa 2 (útil para ver o que a busca achou sem gastar
+    IA). Erros da IA voltam no campo "error" do JSON, com HTTP 200, para o front
+    exibir a mensagem sem quebrar."""
     data = request.get_json(force=True, silent=True) or {}
     question = (data.get("question") or "").strip()
     k = int(data.get("k", 4))
@@ -187,12 +220,18 @@ def api_export():
 
 
 def _port_in_use(host, port):
+    """True se já há algo escutando nesta porta (outro servidor nosso, em geral)."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         return s.connect_ex((host, port)) == 0
 
 
 def main():
+    """Sobe o site em 127.0.0.1:5001 (só a máquina local).
+
+    Se a porta já estiver ocupada, avisa e sai em vez de estourar um erro feio —
+    o caso comum é ter dado dois cliques no web.bat. Índice ausente ou chave da
+    IA vazia geram só aviso: a busca continua funcionando sem a IA."""
     host = "127.0.0.1"
     port = 5001
     if _port_in_use(host, port):

@@ -44,6 +44,49 @@ CATEGORIA_SECAO = {
 
 _CATEGORIAS_VALIDAS = list(CATEGORIA_SECAO.keys())
 
+# Cadernos cuja SEÇÃO é definida pelo próprio caderno, não pelo julgamento da IA:
+# as seções 6, 7 e 8 do relatório SÃO "o que saiu na Parte IB / II / IV-V". O
+# caderno é conhecido de forma determinística (veio do índice), então vale mais
+# que a categoria devolvida pelo modelo.
+CADERNO_CATEGORIA = {
+    "ib": "TCE_SEFAZ",                  # seção 6
+    "ii": "LEGISLATIVO_FAZENDARIO",     # seção 7
+    "iv": "MUNICIPALIDADES_PEDIDO",     # seção 8
+    "v": "MUNICIPALIDADES_PEDIDO",      # seção 8
+}
+
+_RX_CADERNO = re.compile(r"^parte\s+(ib|iv|ii|i|v)\b")
+
+
+def _categoria_do_caderno(caderno):
+    """Categoria obrigatória do caderno, ou None se o caderno não impõe seção.
+
+    Só Parte I fica livre (tem atos de todas as naturezas); IB, II, IV e V têm
+    seção própria no relatório."""
+    m = _RX_CADERNO.match(_norm(caderno or "").strip())
+    return CADERNO_CATEGORIA.get(m.group(1)) if m else None
+
+
+def _forcar_categoria_por_caderno(itens):
+    """Corrige a categoria dos itens de IB/II/IV/V pelo caderno. Devolve nº de correções.
+
+    Sem isto, um ato da Parte V que a IA classificou como OBSERVACAO_EXECUTIVA cai
+    na seção 4 e a seção 8 sai VAZIA — foi o que aconteceu com o SINAVAL e com a
+    declaração da FIRJAN na edição de 31/07/2026, que o monitoramento de referência
+    trouxe na seção 8.
+
+    NOMES_MONITORADOS é exceção: vem da varredura determinística e vale em qualquer
+    caderno (a seção 3 é por pessoa, não por caderno)."""
+    n = 0
+    for it in itens:
+        if it.get("categoria") == "NOMES_MONITORADOS":
+            continue
+        obrigatoria = _categoria_do_caderno(it.get("caderno"))
+        if obrigatoria and it.get("categoria") != obrigatoria:
+            it["categoria"] = obrigatoria
+            n += 1
+    return n
+
 
 def _canon_categoria(cat):
     """Normaliza a categoria vinda da IA para o conjunto canonico. O modelo as vezes
@@ -92,10 +135,13 @@ SYSTEM = (
     "Atos INTERNOS de outro orgao (aposentadoria, PAD, sindicancia, PAR, nomeacao/exoneracao de "
     "servidor de OUTRO orgao, PCAN/pauta de outro orgao) NAO entram, mesmo que a mesma pagina "
     "tenha materia da SEFAZ, e mesmo que o servidor um dia tenha passado pela Fazenda. Excecao: "
-    "cessao/permuta em que a SEFAZ e a origem OU o destino do servidor (isso e SEFAZ).\n\n"
+    "cessao/permuta em que a SEFAZ, o Rioprevidencia OU o Fundo Unico de Previdencia e a origem "
+    "ou o destino do servidor. Vale mesmo que o OUTRO lado seja um orgao de fora: a cessao de um "
+    "servidor da SEEDUC PARA o Rioprevidencia ENTRA (o destino esta no escopo).\n\n"
     "Responda EXCLUSIVAMENTE com um objeto JSON valido (sem texto antes/depois, sem ```), no "
     'formato: {"itens":[{"categoria":"","tipo_ato":"","numero_ano":"","orgao":"","pessoa":"",'
-    '"cargo":"","processo":"","vigencia":"","data_ato":"","prazo":"","resumo":"","pagina":""}]}\n\n'
+    '"cargo":"","processo":"","vigencia":"","data_ato":"","prazo":"","dias_carencia":"",'
+    '"dias_prazo":"","dias_uteis":"","resumo":"","pagina":""}]}\n\n'
     "categoria = UMA de: PRAZO_CRITICO | MOVIMENTACAO_PESSOAL | NOMES_MONITORADOS | "
     "OBSERVACAO_EXECUTIVA | DESTAQUE_CONTROLE_INTERNO | EXPEDIENTE_PONTO_FACULTATIVO | "
     "TCE_SEFAZ | LEGISLATIVO_FAZENDARIO | MUNICIPALIDADES_PEDIDO.\n"
@@ -110,12 +156,26 @@ SYSTEM = (
     "NAO E PRAZO_CRITICO (vao para OBSERVACAO_EXECUTIVA): ato JA CONSUMADO sem acao pendente - "
     "deferimento/concessao de isencao, concessao de aposentadoria/pensao, defesa ja julgada. "
     "So e PRAZO_CRITICO se houver uma ACAO A CUMPRIR ate uma data futura.\n"
-    "PRAZO (obrigatorio em PRAZO_CRITICO): SEMPRE preencha 'prazo' com a data-limite em "
-    "DD/MM/AAAA. Se o texto disser 'N dias (uteis) a contar de DD/MM/AAAA', calcule a data "
-    "final e coloque em 'prazo'. Se der so a data final, use-a. Todo item PRAZO_CRITICO deve "
-    "sair com 'prazo' preenchido; se nao houver data-limite futura, NAO e prazo -> reclassifique.\n"
-    "- MOVIMENTACAO_PESSOAL: nomeacao/exoneracao/designacao/remocao/cessao/afastamento de "
-    "servidor fazendario (ou cargo de comando de outro poder). Membros de comissao NAO contam.\n"
+    "PRAZO: 'prazo' e uma DATA (DD/MM/AAAA) ou \"\". NUNCA escreva texto relativo nele "
+    "('30 dias', '15 dias apos a publicacao'): a coluna e DATE e o valor se perde.\n"
+    "  a) o texto da a DATA-LIMITE explicita (sessao, vencimento, abertura) -> ponha em "
+    "'prazo' e deixe os tres campos de dias vazios;\n"
+    "  b) o prazo e CONTADO EM DIAS -> NAO CALCULE. Deixe 'prazo' vazio e preencha:\n"
+    "     'dias_carencia' = dias ate o prazo COMECAR a correr ('apos 15 dias da publicacao "
+    "inicia-se o prazo' -> 15). Se comeca na propria publicacao, 0.\n"
+    "     'dias_prazo'    = o tamanho do prazo em si ('prazo de 60 dias para pagamento' -> 60).\n"
+    "     'dias_uteis'    = 'sim' se o texto disser dias UTEIS; senao 'nao'.\n"
+    "     Exemplo: 'Apos 15 dias da publicacao inicia-se o prazo de 60 dias para pagamento' -> "
+    "dias_carencia=15, dias_prazo=60, dias_uteis='nao', prazo=\"\". Quem soma e o sistema, a "
+    "partir da data da edicao - nao faca a conta, so leia os numeros;\n"
+    "  c) sem data-limite futura e sem prazo em dias -> nao e PRAZO_CRITICO, reclassifique.\n"
+    "SEMPRE descreva a contagem no 'resumo' ('60 dias para pagamento, iniciados 15 dias apos a "
+    "publicacao') - o leitor precisa conferir a regra.\n"
+    "- MOVIMENTACAO_PESSOAL: nomeacao/exoneracao/designacao/remocao/TRANSFERENCIA/permuta/"
+    "cessao/afastamento de servidor fazendario (ou cargo de comando de outro poder). "
+    "TRANSFERENCIA inclui mudanca de lotacao ou de colegiado - ex.: Auditor Tributario "
+    "transferido de uma Turma de Julgamento para outra na Junta de Revisao Fiscal (Portaria "
+    "JRF): gere UM item por servidor transferido. Membros de comissao NAO contam.\n"
     "- NOMES_MONITORADOS: ato concreto sobre Guilherme Merces (Secretario de Fazenda) ou sobre "
     "o Chefe de Gabinete / Subsecretario / Subsecretario Adjunto da SEFAZ.\n"
     "- OBSERVACAO_EXECUTIVA: decretos com impacto orcamentario (credito suplementar/dotacao), "
@@ -123,7 +183,11 @@ SYSTEM = (
     "MENSAGENS DE VETO a dispositivos com impacto fazendario (gere um item PROPRIO para o veto, "
     "SEPARADO da lei sancionada, citando os artigos vetados e o motivo do veto), resolucoes, "
     "portarias de superintendencia, atas de colegiado, Conselho de Contribuintes, termos "
-    "aditivos, cancelamento de IE, instituicao de comissao.\n"
+    "aditivos, cancelamento de IE, instituicao de comissao, DESPACHOS do Representante da "
+    "Fazenda (ex.: declaracao de identidade parcial entre litigio administrativo e judicial de "
+    "um contribuinte - gere UM item por despacho, citando o contribuinte e o tema tributario) e "
+    "DELEGACAO de competencia ou de poderes a autoridade/servidor (delegar nao e movimentacao "
+    "de pessoal: o servidor nao muda de cargo, so recebe atribuicao - vai aqui).\n"
     "- DESTAQUE_CONTROLE_INTERNO: Controle Interno, Corregedoria Tributaria (CTCE), Auditoria "
     "Interna/AGE com vinculo SEFAZ, Tomada de Contas Especial da SEFAZ.\n"
     "- EXPEDIENTE_PONTO_FACULTATIVO: ponto facultativo/expediente/feriado/recesso estadual.\n"
@@ -136,6 +200,11 @@ SYSTEM = (
     "- MUNICIPALIDADES_PEDIDO: ato (Partes IV/V) onde a SEFAZ/Rioprevidencia e a publicadora, "
     "contratante ou conveniada. NAO inclua atos de prefeituras ou de outras secretarias (ex.: "
     "SEDEC) so por citarem 'Fazenda' generico.\n"
+    "ANEXOS E TABELAS: anexo de decreto (Anexo I, II, V, VI...), quadro de dotacao orcamentaria, "
+    "limite de empenho ou alteracao de modalidade de aplicacao NAO gera item proprio - o decreto "
+    "ja e o item. Cite no resumo DO DECRETO o objeto e o valor GLOBAL. Se a tabela estiver "
+    "ilegivel no texto (celulas quebradas, numeros partidos), escreva 'valores no anexo do "
+    "decreto' e NAO tente reconstruir cifra nenhuma: numero inventado e pior que numero ausente.\n"
     "CONSOLIDACAO: quando UM MESMO ato (ex.: um despacho do Secretario, um edital) decide/julga "
     "VARIOS itens homogeneos de uma vez (ex.: 'julgamento de N recursos', lista de varios "
     "processos/contribuintes), gere UM UNICO item informando a QUANTIDADE no 'resumo' "
@@ -146,9 +215,9 @@ SYSTEM = (
     "'Auditora Fiscal').\n"
     "Preencha 'pagina' com o numero do rotulo [pagina N].\n"
     "'data_ato' = data em que o ato foi assinado/publicado, se houver (formato DD/MM/AAAA).\n"
-    "'prazo' = data-limite da acao, quando houver (tipico em PRAZO_CRITICO: sessao, vencimento, "
-    "entrega). Se nao houver data, deixe \"\".\n"
-    "Deixe campos vazios como \"\". Nao invente datas. "
+    "'prazo' = data-limite explicita; prazo contado em dias vai nos campos de dias (regra PRAZO).\n"
+    "Deixe campos vazios como \"\". Nao invente datas nem numeros de dias: transcreva o que "
+    "o texto diz. "
     "Na duvida sobre relevancia para a SEFAZ, NAO inclua. Se nada relevante, itens=[]."
 )
 
@@ -226,6 +295,10 @@ def _compilar_kw(kws):
 
 
 def _pagina_relevante(content, rx):
+    """True se o texto da página casa com algum termo do pré-filtro (`rx` de _compilar_kw).
+
+    Sem regex compilado (lista vazia), devolve False — melhor não mandar nada para
+    a IA do que mandar a edição inteira por engano."""
     return bool(rx.search(_norm(content))) if rx else False
 
 
@@ -244,6 +317,11 @@ def _paginas_relevantes(caderno, date, rx):
 
 
 def _cadernos_da_edicao(date):
+    """Nomes dos cadernos já indexados nesta edição (Parte I, IB, II, IV, V).
+
+    Vem do índice, e não de config.CADERNOS, para o monitor processar só o que
+    de fato foi lido — se um caderno falhou no download, ele simplesmente não
+    aparece aqui."""
     con = sqlite3.connect(config.DB_PATH)
     try:
         rows = con.execute(
@@ -252,6 +330,15 @@ def _cadernos_da_edicao(date):
     finally:
         con.close()
     return [r[0] for r in rows]
+
+
+def _data_br(date_iso):
+    """'2026-08-03' -> '03/08/2026' (formato que vai no prompt)."""
+    try:
+        a, m, d = str(date_iso).split("-")
+        return f"{d}/{m}/{a}"
+    except ValueError:
+        return str(date_iso or "")
 
 
 def _norm(s):
@@ -273,6 +360,29 @@ def _dehifenizar(texto):
     com a licença-prêmio do Verbicário em 29/07/2026. Vale para 37 das 62 páginas
     de uma edição típica da Parte I."""
     return _RE_HIFEN.sub(r"\1\2", texto or "")
+
+
+# O MinerU devolve as TABELAS do D.O. em HTML. Quando o monitorado aparece dentro
+# de uma (listas de servidores, quadros de licença), o trecho recortado vem cheio
+# de <td rowspan=...> e fica ilegível no relatório — foi o caso de Diana Cabral
+# Siqueira na edição de 03/08/2026.
+_RE_TAG = re.compile(r"<[^>]*>")
+
+
+def _limpar_html(texto):
+    """Tira as tags HTML do trecho e normaliza os espaços.
+
+    O trecho é recortado por posição, então costuma começar e terminar NO MEIO de
+    uma tag ('=1>50069349...' é o rabo de um '<td colspan=1>'). Esses cacos não
+    casam com _RE_TAG (falta o '<' ou o '>'), então são cortados à parte."""
+    t = texto or ""
+    fim_caco = t.find(">")
+    if fim_caco != -1 and (t.find("<") == -1 or fim_caco < t.find("<")):
+        t = t[fim_caco + 1:]                      # caco de tag aberta antes do recorte
+    ini_caco = t.rfind("<")
+    if ini_caco != -1 and t.find(">", ini_caco) == -1:
+        t = t[:ini_caco]                          # tag que ficou sem fechar no fim
+    return " ".join(_RE_TAG.sub(" ", t).split())
 
 
 def _tokens_nome(nome):
@@ -298,6 +408,24 @@ def _casa_nome(texto_norm, toks):
         if ok:
             return m.start()
     return -1
+
+
+# O EXPEDIENTE (lista de secretarios no alto da Parte I, p.1) cita dezenas de nomes
+# que não são ato nenhum — o Secretário de Fazenda aparece ali TODO dia, gerando uma
+# menção falsa por edição. Ali "SECRETARIA DE ESTADO ..." se repete a cada ~60 chars;
+# num ato de verdade aparece 1x ou 2x, como cabeçalho da matéria. Medido na edição de
+# 30/07/2026: 14 ocorrências na janela do expediente contra 0-1 nas menções reais
+# (Salvetti assinando como Secretário em exercício, Zenni presidindo a CTCE) — daí o 4.
+_RX_EXPEDIENTE = re.compile(r"secretaria de estado")
+_EXPEDIENTE_JANELA = 600
+_EXPEDIENTE_MIN = 4
+
+
+def _e_expediente(texto_norm, pos):
+    """True se a posição `pos` cai no bloco do expediente, e não num ato de verdade."""
+    ini = max(0, pos - _EXPEDIENTE_JANELA)
+    fim = min(len(texto_norm), pos + _EXPEDIENTE_JANELA)
+    return len(_RX_EXPEDIENTE.findall(texto_norm[ini:fim])) >= _EXPEDIENTE_MIN
 
 
 def _carregar_monitorados(date):
@@ -353,17 +481,20 @@ def _scan_monitorados(date):
         for caderno, page, content, n_txt, deh, n_deh in paginas:
             # Tenta primeiro o texto como veio; só então o de-hifenizado (juntar
             # pedaços pode, em tese, colar um sobrenome no seguinte).
-            pos, base = _casa_nome(n_txt, toks), content
+            pos, base, norm = _casa_nome(n_txt, toks), content, n_txt
             if pos < 0:
-                pos, base = _casa_nome(n_deh, toks), deh
+                pos, base, norm = _casa_nome(n_deh, toks), deh, n_deh
             if pos < 0:
+                continue
+            # Menção no expediente (lista de secretarios) não é ato: descarta.
+            if _e_expediente(norm, pos):
                 continue
             chave = (nome, caderno, page)
             if chave in vistos:
                 continue
             vistos.add(chave)
             ini, fim = max(0, pos - 40), min(len(base), pos + 160)
-            trecho = " ".join(base[ini:fim].split())
+            trecho = _limpar_html(base[ini:fim])
             itens.append({"categoria": "NOMES_MONITORADOS", "pessoa": nome,
                           "cargo": m.get("funcao", ""),
                           "tipo_ato": "Mencao no D.O.", "caderno": caderno,
@@ -371,7 +502,326 @@ def _scan_monitorados(date):
     return itens, origem, len(monitorados)
 
 
+# --------------------------------------------------------------------------
+# Pautas do Conselho de Contribuintes (seção 1) — contagem DETERMINÍSTICA
+# --------------------------------------------------------------------------
+# A IA erra a quantidade de recursos: na edição de 31/07/2026 devolveu 7 e 13
+# recursos onde havia 13 e 15, e ainda juntou as três sessões do dia num item só,
+# perdendo os horários. Contar "Recurso nº" dentro do bloco de cada pauta é
+# trivial e exato — não é trabalho para o modelo.
+_MESES = {"janeiro": 1, "fevereiro": 2, "marco": 3, "abril": 4, "maio": 5, "junho": 6,
+          "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11,
+          "dezembro": 12}
+
+# O cabecalho varia: "Pauta de Julgamento" (o comum), "Pauta Aditiva de Julgamento"
+# (04/08/2026, que passou batido), "PAUTA PARA JULGAMENTO" e "PAUTA DE CONTINUACAO
+# DE JULGAMENTO". Aceita ate 3 palavras entre "Pauta" e "Julgamento".
+_RX_PAUTA = re.compile(
+    r"Pauta(?:\s+[A-Za-zÀ-ÿ]+){0,3}\s+Julgamento"
+    r"[^\n]{0,120}?do dia\s+(\d{1,2})\s+de\s+([A-Za-zÀ-ÿ]+)\s+de\s+(\d{4})"
+    r"\s*,?\s*(?:[àa]s\s+(\d{1,2})\s*(?:h|horas)\s*(\d{2})?\s*(?:min)?)?",
+    re.IGNORECASE)
+_RX_CAMARA = re.compile(
+    r"(?:PRIMEIRA|SEGUNDA|TERCEIRA|QUARTA|QUINTA|SEXTA)\s+C[ÂA]MARA"
+    r"|C[ÂA]MARA\s+ESPECIAL|CONSELHO\s+PLENO", re.IGNORECASE)
+# "Recurso nº 83744", mas também "Recurso Voluntário nº 78640" e "Recurso de
+# Ofício nº 78257" — as três formas convivem na mesma pauta. Aceita até 3 palavras
+# entre "Recurso" e o número (o qualificador), o que exclui frases soltas.
+_RX_RECURSO = re.compile(
+    r"Recurso(?:\s+[A-Za-zÀ-ÿ]+){0,3}\s+n[º°o.]?\s*(\d+)", re.IGNORECASE)
+_RX_FIM_PAUTA = re.compile(r"NOTA\s+EXPLICATIVA", re.IGNORECASE)
+
+# Janela antes do cabeçalho da pauta onde procuramos "Conselho de Contribuintes"
+# e o nome da câmara. O cabeçalho vem imediatamente antes ("SECRETARIA DE ESTADO
+# DE FAZENDA CONSELHO DE CONTRIBUINTES QUARTA CÂMARA"), mas o texto do MinerU às
+# vezes carrega o fim da matéria anterior — 400 chars cobrem com folga.
+_PAUTA_JANELA = 400
+
+
+def _texto_do_caderno(date, caderno):
+    """(texto colado de todas as páginas, [(offset_inicial, pagina)]) do caderno.
+
+    Cola as páginas para que uma pauta que começa numa e termina na seguinte seja
+    lida como um bloco só — foi o caso da sessão das 13h de 17/08 na edição de
+    31/07/2026, partida entre as páginas 8 e 9."""
+    con = sqlite3.connect(config.DB_PATH)
+    try:
+        linhas = con.execute(
+            "SELECT page, content FROM pages WHERE date=? AND caderno=? ORDER BY page",
+            (date, caderno),
+        ).fetchall()
+    finally:
+        con.close()
+    partes, mapa, pos = [], [], 0
+    for page, content in linhas:
+        mapa.append((pos, int(page)))
+        partes.append(content or "")
+        pos += len(content or "") + 1          # +1 do "\n" da junção
+    return "\n".join(partes), mapa
+
+
+def _pagina_do_offset(mapa, offset):
+    """Número da página que contém esse offset no texto colado do caderno."""
+    pagina = mapa[0][1] if mapa else 0
+    for ini, page in mapa:
+        if ini > offset:
+            break
+        pagina = page
+    return pagina
+
+
+def _scan_pautas(date):
+    """Pautas do Conselho de Contribuintes da edição, uma por SESSÃO (data + hora).
+
+    Determinístico, sem IA: acha cada cabeçalho de pauta, corta o bloco na próxima
+    pauta ou na NOTA EXPLICATIVA e conta os "Recurso nº" de dentro. Devolve itens
+    PRAZO_CRITICO já no formato do relatório."""
+    itens, vistos = [], set()
+    for caderno in _cadernos_da_edicao(date):
+        texto, mapa = _texto_do_caderno(date, caderno)
+        if not texto:
+            continue
+        marcas = list(_RX_PAUTA.finditer(texto))
+        for i, m in enumerate(marcas):
+            antes = texto[max(0, m.start() - _PAUTA_JANELA):m.start()]
+            # Só as pautas do Conselho de Contribuintes (SEFAZ). Outros órgãos
+            # também publicam "Pauta de Julgamento" e não entram na seção 1.
+            if "conselho de contribuintes" not in _norm(antes):
+                continue
+            fim = marcas[i + 1].start() if i + 1 < len(marcas) else len(texto)
+            bloco = texto[m.end():fim]
+            corte = _RX_FIM_PAUTA.search(bloco)
+            if corte:
+                bloco = bloco[:corte.start()]
+            recursos = _RX_RECURSO.findall(bloco)
+            if not recursos:
+                continue                       # cabeçalho sem lista: não conta
+            mes = _MESES.get(_norm(m.group(2)))
+            if not mes:
+                continue
+            data_sessao = f"{int(m.group(1)):02d}/{mes:02d}/{m.group(3)}"
+            # 'as 14h' ou 'as 14h30min' - o horario faz parte da conferencia do prazo.
+            hora = f"{int(m.group(4))}h{m.group(5)}" if m.group(4) and m.group(5) \
+                else (f"{int(m.group(4))}h" if m.group(4) else "")
+            cam = _RX_CAMARA.search(antes)
+            camara = " ".join(cam.group(0).split()).title() if cam else "Conselho de Contribuintes"
+            chave = (data_sessao, hora, _norm(camara))
+            if chave in vistos:
+                continue                       # mesma sessão repetida no caderno
+            vistos.add(chave)
+            itens.append({
+                "categoria": "PRAZO_CRITICO",
+                "tipo_ato": "Pauta de Julgamento do Conselho de Contribuintes",
+                "numero_ano": f"{len(recursos)} recurso(s)",
+                "orgao": "SEFAZ - Conselho de Contribuintes",
+                "pessoa": "", "cargo": "", "processo": "", "vigencia": "",
+                "data_ato": "", "prazo": data_sessao,
+                "resumo": (f"{camara}: sessao de {data_sessao}"
+                           f"{' as ' + hora if hora else ''} com {len(recursos)} recurso(s) "
+                           f"pautado(s) (n. {', '.join(recursos)})."),
+                "caderno": caderno,
+                "pagina": str(_pagina_do_offset(mapa, m.start())),
+            })
+    return itens
+
+
+def _e_item_pauta(it):
+    """True se o item veio da IA descrevendo uma pauta de julgamento (será substituído
+    pelo item determinístico de _scan_pautas)."""
+    txt = _norm(f"{it.get('tipo_ato', '')} {it.get('resumo', '')}")
+    return "pauta" in txt and ("julgamento" in txt or "sessao" in txt)
+
+
+# --------------------------------------------------------------------------
+# Prazo em dias -> data (a conta é do CÓDIGO, não da IA)
+# --------------------------------------------------------------------------
+# Metade dos prazos do D.O. é contada em dias a partir da publicação, e o campo
+# PRAZO da 002A é DATE: texto relativo ("15 dias apos a publicacao") virava NULL.
+# Pedir a data pronta à IA também não serve — no teste de 03/08/2026 ela somou os
+# 60 dias direto na edição e ignorou os 15 de carência, adiantando o prazo de um
+# ITD em 15 dias. Então a IA lê os NÚMEROS e quem soma é esta função.
+_RX_DIAS = re.compile(r"\d+")
+
+
+def _int_ou_zero(valor):
+    """Primeiro inteiro do campo ('15', '15 dias', '', None) -> int. 0 se não houver."""
+    m = _RX_DIAS.search(str(valor or ""))
+    return int(m.group()) if m else 0
+
+
+def _calcular_prazos(itens, date):
+    """Preenche 'prazo' a partir de dias_carencia/dias_prazo e da data da edição.
+
+    Devolve (nº calculado, nº deixado em branco por ser em dias úteis). Dias úteis
+    não são calculados de propósito: dependeriam do calendário de feriados, e uma
+    data errada num prazo é pior do que um campo vazio — o resumo continua com a
+    regra por extenso."""
+    import datetime as dt
+    try:
+        base = dt.date(*(int(x) for x in str(date).split("-")))
+    except (ValueError, TypeError):
+        return 0, 0
+
+    calculados = uteis = 0
+    for it in itens:
+        dias = _int_ou_zero(it.get("dias_prazo"))
+        if not dias:
+            continue
+        if _norm(it.get("dias_uteis")).startswith("s"):
+            uteis += 1
+            continue
+        carencia = _int_ou_zero(it.get("dias_carencia"))
+        fim = base + dt.timedelta(days=carencia + dias)
+        anterior = (it.get("prazo") or "").strip()
+        it["prazo"] = fim.strftime("%d/%m/%Y")
+        calculados += 1
+        # Deixa a conta visível no relatório: quem lê confere sem abrir o D.O.
+        conta = f"[prazo calculado: edicao {_data_br(date)}"
+        conta += f" + {carencia} dias de carencia" if carencia else ""
+        conta += f" + {dias} dias corridos]"
+        it["resumo"] = f"{(it.get('resumo') or '').strip()} {conta}".strip()
+        if anterior and anterior != it["prazo"]:
+            print(f"[monitor]   prazo recalculado: a IA disse {anterior}, a conta deu "
+                  f"{it['prazo']} ({carencia}+{dias} dias)")
+    return calculados, uteis
+
+
+# --------------------------------------------------------------------------
+# Id do próprio DOERJ (coluna ID_DOERJ da 002A)
+# --------------------------------------------------------------------------
+# O IOERJ fecha cada matéria publicada com "Id: 2753789". Guardar esse número
+# liga o nosso registro à PUBLICAÇÃO OFICIAL — quem contesta um item do relatório
+# chega no D.O. sem procurar página por página. Não confundir com a coluna ID,
+# que é nossa: o Id do IOERJ identifica a MATÉRIA e se repete quando uma matéria
+# vira vários registros (a Portaria JRF nº 182 virou 3 linhas em 03/08/2026).
+#
+# Como casamos: procuramos uma âncora do item (o nº do processo resolve 165 dos
+# 178 casos) no texto da edição e pegamos o primeiro "Id:" DEPOIS dela — que é o
+# fecho daquela matéria. Medido em 4 edições (208 registros): 85% casam. Os 15%
+# restantes são registros sem processo, sem número e sem pessoa (anexos de
+# decreto, avisos genéricos) — ficam nulos, e tudo bem.
+_RX_ID_DOERJ = re.compile(r"Id:\s*(\d+)")
+_MIN_ANCORA = 10                      # âncora curta casaria em qualquer lugar
+
+
+def _so_alnum(s):
+    """Só letras e dígitos — o D.O. quebra 'SEI-040006/033029/2026' com espaços e hífens."""
+    return re.sub(r"[^0-9a-zA-Z]", "", s or "")
+
+
+def _indice_edicao(date):
+    """(texto colado da edição, versão só-alfanumérica, mapa de posições).
+
+    O mapa liga cada caractere alfanumérico à sua posição no texto original, para
+    a busca ignorar pontuação/quebras e ainda assim achar o offset real."""
+    con = sqlite3.connect(config.DB_PATH)
+    try:
+        partes = [t or "" for (t,) in con.execute(
+            "SELECT content FROM pages WHERE date=? ORDER BY caderno, page", (date,))]
+    finally:
+        con.close()
+    texto = "\n".join(partes)
+    plano, buf = [], []
+    for i, ch in enumerate(texto):
+        if ch.isalnum():
+            buf.append(ch)
+            plano.append(i)
+    return texto, "".join(buf), plano
+
+
+def _casar_id_doerj(itens, date):
+    """Preenche 'id_doerj' em cada item. Devolve o nº de itens casados."""
+    texto, plano_txt, plano = _indice_edicao(date)
+    if not texto:
+        return 0
+    casados = 0
+    for it in itens:
+        achado = None
+        for campo in ("processo", "numero_ano", "pessoa", "resumo"):
+            for pedaco in re.split(r"[;,]", str(it.get(campo) or ""))[:4]:
+                chave = _so_alnum(pedaco)
+                if len(chave) < _MIN_ANCORA:
+                    continue
+                j = plano_txt.find(chave)
+                if j < 0:
+                    continue
+                m = _RX_ID_DOERJ.search(texto, plano[j])
+                if m:
+                    achado = m.group(1)
+                    break
+            if achado:
+                break
+        it["id_doerj"] = achado
+        casados += 1 if achado else 0
+    return casados
+
+
+# --------------------------------------------------------------------------
+# Conferência dos números contra a fonte (anti-alucinação)
+# --------------------------------------------------------------------------
+# Auditoria de 05/08/2026: 3 registros afirmavam cifras que NÃO existem no texto
+# da edição. A causa não foi o modelo inventar do nada — foi a tabela do Anexo V
+# de 28/07 sair partida do MinerU ("<td>10.00</td><td>0 10.000</td>") e a IA
+# "reconstruir" números plausíveis. É o pior erro possível: parece específico e
+# correto. Aqui conferimos cada número do resumo contra o texto da edição.
+#
+# O que isto NÃO pega: dígito trocado que por acaso exista noutro ponto da
+# edição. É rede contra invenção, não contra erro de leitura.
+_RX_MARCADOR = re.compile(r"\[[^\]]*\]")           # trechos que NÓS acrescentamos
+_RX_DATA = re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b")
+_RX_NUMERO_TXT = re.compile(r"\d[\d.,]{3,}\d")
+_MIN_DIGITOS = 5
+
+
+def _numeros_do_resumo(resumo):
+    """Números do resumo que devem existir na fonte -> [(texto original, só dígitos)].
+
+    Ignora o que o próprio código escreveu (marcadores entre colchetes, como
+    '[prazo calculado: ...]'), datas e anos soltos."""
+    texto = _RX_MARCADOR.sub(" ", resumo or "")
+    texto = _RX_DATA.sub(" ", texto)
+    saida, vistos = [], set()
+    for m in _RX_NUMERO_TXT.finditer(texto):
+        bruto = m.group()
+        digitos = re.sub(r"\D", "", bruto)
+        if len(digitos) < _MIN_DIGITOS or re.fullmatch(r"(19|20)\d{2}", digitos):
+            continue
+        if digitos not in vistos:
+            vistos.add(digitos)
+            saida.append((bruto, digitos))
+    return saida
+
+
+def _validar_numeros(itens, date):
+    """Marca os itens cujos números não aparecem na edição. Devolve (itens, números).
+
+    NÃO descarta o item: nos casos vistos o ATO é real e só a cifra é que não se
+    sustenta (o edital de autos de infração de 23/07 existe; o total é que não
+    confere). Descartar perderia ato verdadeiro, e em silêncio."""
+    texto, _, _ = _indice_edicao(date)
+    if not texto:
+        return 0, 0
+    digitos_fonte = re.sub(r"\D", "", texto)
+    n_itens = n_numeros = 0
+    for it in itens:
+        faltando = [bruto for bruto, dig in _numeros_do_resumo(it.get("resumo"))
+                    if dig not in digitos_fonte]
+        if not faltando:
+            continue
+        n_itens += 1
+        n_numeros += len(faltando)
+        it["resumo"] = (f"{(it.get('resumo') or '').strip()} "
+                        f"[valores nao localizados na publicacao: {'; '.join(faltando[:6])}]")
+    return n_itens, n_numeros
+
+
 def _extrair_json(resp):
+    """Extrai o objeto JSON da resposta da IA, tolerando o que ela costuma acrescentar.
+
+    O prompt pede JSON puro, mas o modelo às vezes embrulha em ```json ... ``` ou
+    escreve uma frase antes/depois. Aqui tiramos a cerca de crase e cortamos do
+    primeiro '{' até o último '}'. Levanta a exceção do json.loads se ainda assim
+    não for JSON válido — quem chama trata isso como bloco sem itens."""
     text = "".join(b.text for b in resp.content if b.type == "text").strip()
     if text.startswith("```"):
         text = text.strip("`")
@@ -383,8 +833,13 @@ def _extrair_json(resp):
     return json.loads(text)
 
 
-def _mapear_bloco(caderno, paginas, client, max_tokens=8000):
-    """Uma chamada à IA sobre um bloco de páginas de um caderno. Devolve (itens, usage)."""
+def _mapear_bloco(caderno, paginas, client, max_tokens=8000, date=None):
+    """Uma chamada à IA sobre um bloco de páginas de um caderno. Devolve (itens, usage).
+
+    `date` (a edição) vai no prompt porque metade dos prazos do D.O. é contada "a
+    partir da publicação": sem a data da edição o modelo não tem como fechar a
+    conta e acabava escrevendo "15 dias após a publicação" no campo `prazo`, que é
+    DATE na 002A e virava NULL."""
     blocos = []
     for p in paginas:
         txt = page_content(p["pdf"], p["page"]).strip()
@@ -393,7 +848,8 @@ def _mapear_bloco(caderno, paginas, client, max_tokens=8000):
     if not blocos:
         return [], {"input": 0, "output": 0}, True
     corpo = "\n\n----------\n\n".join(blocos)
-    prompt = (f"Caderno: {caderno}\nEdicao do DOERJ.\n\nTrechos:\n\n{corpo}\n\n"
+    edicao = f" publicada em {_data_br(date)}" if date else ""
+    prompt = (f"Caderno: {caderno}\nEdicao do DOERJ{edicao}.\n\nTrechos:\n\n{corpo}\n\n"
               "Lembre-se: responda apenas com o objeto JSON.")
     # Resiliência: a Azure Foundry às vezes falha (timeout/5xx/rate-limit). Tenta
     # até 5x com backoff exponencial; se ainda falhar, PULA o bloco (ok=False) e
@@ -429,6 +885,23 @@ def _mapear_bloco(caderno, paginas, client, max_tokens=8000):
 
 
 def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
+    """Monta o monitoramento de UMA edição: Excel com 8 abas + gravação na 002A.
+
+    O caminho completo, na ordem:
+      1. trava de custo — se o Excel canônico do dia já existe e não veio --force,
+         sai antes de chamar a IA (o job roda de hora em hora);
+      2. para cada caderno indexado, seleciona as páginas pelo pré-filtro da 002B
+         (ou todas, com `todas_paginas`) e manda em blocos de `chunk` páginas à IA;
+      3. normaliza a categoria de cada item devolvido (o modelo erra a grafia);
+      4. DESCARTA o que a IA marcou como NOMES_MONITORADOS e põe no lugar a
+         varredura determinística da 002N — nomes não dependem do modelo;
+      5. grava o .xlsx e, só se a rodada foi completa, a tabela 002A.
+
+    Rodada PARCIAL (algum bloco falhou na IA após 5 tentativas) sai como
+    *_PARCIAL.xlsx e NÃO grava no Oracle: melhor não ter o dado do que ter o dado
+    pela metade, que passaria despercebido.
+
+    `date` vazio = edição mais recente do índice. Devolve o caminho do Excel."""
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
@@ -479,7 +952,7 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
             continue
         print(f"[monitor] {caderno}: {len(paginas)} pagina(s) para a IA ...")
         for i in range(0, len(paginas), chunk):
-            itens, usage, ok = _mapear_bloco(caderno, paginas[i:i + chunk], client)
+            itens, usage, ok = _mapear_bloco(caderno, paginas[i:i + chunk], client, date=date)
             blocos_total += 1
             blocos_falha += 0 if ok else 1
             todos.extend(itens)
@@ -491,11 +964,44 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     for it in todos:
         it["categoria"] = _canon_categoria(it.get("categoria"))
 
+    # Prazo contado em dias -> data. A IA leu os números; a soma é nossa.
+    n_prazo, n_uteis = _calcular_prazos(todos, date)
+    if n_prazo or n_uteis:
+        print(f"[monitor] prazos: {n_prazo} data(s) calculada(s) a partir da edicao"
+              + (f"; {n_uteis} em dias uteis deixado(s) em branco (feriados)" if n_uteis else ""))
+
     # NOMES_MONITORADOS vem da varredura DETERMINÍSTICA (confiável, sem depender
     # da IA): descarta o que a IA marcou nessa categoria e usa a lista de nomes.
     todos = [it for it in todos if it.get("categoria") != "NOMES_MONITORADOS"]
     monit, origem, n_vigentes = _scan_monitorados(date)
     todos.extend(monit)
+
+    # Pautas do Conselho de Contribuintes: idem. A IA erra a contagem de recursos
+    # e junta as sessões do dia; a varredura conta exato e separa por sessão. Só
+    # descarta os itens de pauta da IA se a varredura achou pauta nesta edição —
+    # se não achou, o item do modelo é melhor do que seção vazia.
+    pautas = _scan_pautas(date)
+    if pautas:
+        antes = len(todos)
+        todos = [it for it in todos if not _e_item_pauta(it)]
+        todos.extend(pautas)
+        print(f"[monitor] pautas do Conselho: {len(pautas)} sessao(oes) contada(s) por varredura "
+              f"({antes - len(todos) + len(pautas)} item(ns) da IA substituido(s))")
+
+    # A seção de IB/II/IV-V é definida pelo caderno, não pelo palpite do modelo.
+    n_corr = _forcar_categoria_por_caderno(todos)
+    if n_corr:
+        print(f"[monitor] {n_corr} item(ns) reclassificado(s) pela secao do proprio caderno.")
+
+    # Id da matéria no DOERJ: liga o registro à publicação oficial.
+    n_id = _casar_id_doerj(todos, date)
+    print(f"[monitor] Id do DOERJ: {n_id}/{len(todos)} registro(s) casado(s) com a materia")
+
+    # Confere os números do resumo contra o texto da edição (anti-alucinação).
+    n_marc, n_num = _validar_numeros(todos, date)
+    if n_marc:
+        print(f"[ATENCAO] {n_marc} item(ns) com {n_num} numero(s) que NAO existem no texto da "
+              f"edicao -> marcados no resumo (conferir na publicacao).")
     print(f"[monitor] lista de monitorados: {n_vigentes} nome(s) vigente(s) em {date} "
           f"(fonte: {origem})")
     if monit:
@@ -534,6 +1040,15 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
 
 
 def _build_xlsx(arquivo, date, itens, blocos_total=None, blocos_falha=0):
+    """Escreve o .xlsx: uma aba "Resumo" + uma aba por seção do relatório.
+
+    Os itens são distribuídos pelas 8 seções por CATEGORIA_SECAO (duas categorias
+    caem na mesma seção 4). Seção sem item recebe uma linha dizendo isso, para o
+    leitor distinguir "não houve" de "falhou".
+
+    O aviso de completude no topo do Resumo é o ponto-chave: em vermelho quando
+    `blocos_falha` > 0, verde quando a rodada leu tudo. Sem isso, um relatório
+    incompleto passaria por completo."""
     import xlsxwriter
     wb = xlsxwriter.Workbook(str(arquivo))
     f_hdr = wb.add_format({"bold": True, "bg_color": "#0052cc", "font_color": "white",
@@ -573,7 +1088,12 @@ def _build_xlsx(arquivo, date, itens, blocos_total=None, blocos_falha=0):
             ws.write(0, c, titulo, f_hdr)
         for li, it in enumerate(por_secao[n], start=1):
             for c, chave in enumerate(CHAVES):
-                ws.write(li, c, str(it.get(chave, "") or ""), f_wrap)
+                # write_string, NUNCA write: o write() do xlsxwriter despacha por
+                # aparencia — texto comecando com '=' vira FORMULA (a celula sai
+                # vazia no Excel) e texto que parece numero vira numero. Um resumo
+                # recortado do meio de uma tabela pode comecar com '=' (aconteceu
+                # em 03/08/2026). Aqui tudo e texto, sempre.
+                ws.write_string(li, c, str(it.get(chave, "") or ""), f_wrap)
         for c, w in enumerate(larg):
             ws.set_column(c, c, w)
         ws.freeze_panes(1, 0)
@@ -583,6 +1103,7 @@ def _build_xlsx(arquivo, date, itens, blocos_total=None, blocos_falha=0):
 
 
 def main():
+    """Linha de comando: lê os argumentos e chama gerar(). Ponto de entrada do passo 5/5."""
     ap = argparse.ArgumentParser(description="Gera o Monitoramento DOERJ estruturado em Excel.")
     ap.add_argument("--date", default=None, help="Edicao AAAA-MM-DD (padrao: a mais recente)")
     ap.add_argument("--dir", default=None, help="Pasta de destino (padrao: <projeto>/relatorios)")

@@ -3,10 +3,9 @@ REM ==========================================================================
 REM  run_pipeline.bat  ·  Pipeline diario completo do DOERJ
 REM  --------------------------------------------------------------------------
 REM  Roda, em cadeia (para no primeiro erro):
-REM    0) download_diario  -> baixa o D.O. do dia (Playwright)
-REM    1) index_build --latest -> MinerU extrai + indexa a Parte I
-REM    2) ler_cadernos     -> indexa os cadernos IB/II/IV/V
-REM    3) exonerar         -> Excel das exoneracoes
+REM    1) download_diario  -> baixa o D.O. do dia (Playwright)
+REM    2) index_build --latest -> MinerU extrai + indexa a Parte I
+REM    3) ler_cadernos     -> indexa os cadernos IB/II/IV/V
 REM    4) atos_pessoal     -> atos de pessoal no Oracle (001A)
 REM    5) monitor_estruturado -> monitor 8 temas no Oracle (002A) + Excel
 REM  Log de cada execucao em logs\pipeline.log.

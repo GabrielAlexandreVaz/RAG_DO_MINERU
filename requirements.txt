@@ -15,7 +15,7 @@ python-dotenv>=1.0    # lê as chaves do .env
 Flask>=3.0            # servidor web local
 markdown>=3.5         # renderiza a resposta (Markdown -> HTML) no front
 
-# === Relatorios (Excel do monitor/exoneracoes e PDF do site) ===
+# === Relatorios (Excel do monitor e PDF do site) ===
 xlsxwriter>=3.2       # .xlsx (export.py e monitor_estruturado.py)
 reportlab>=4.0        # .pdf (export.py)
 

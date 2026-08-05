@@ -91,6 +91,8 @@ def mais_recente(pdfs):
     Fallback: se algum arquivo não tiver data no nome, usa a data de modificação.
     Usado pelo job diário (--latest) para pegar sempre a edição do dia."""
     def chave(p):
+        """Ordena os PDFs: os que têm data no nome vêm primeiro (tupla começando
+        em 1) e, entre eles, pela data; o resto cai para a data de modificação."""
         m = DATE_RE.search(p.name)
         return (1, m.group(1)) if m else (0, str(p.stat().st_mtime))
     return max(pdfs, key=chave)
@@ -227,6 +229,10 @@ def index_caderno_bytes(con, caderno, date, pdf_bytes, chave="parte"):
 
 
 def main():
+    """Linha de comando do passo 2/5: texto do MinerU -> índice FTS5.
+
+    --latest processa só a edição mais recente (o que o pipeline usa todo dia);
+    --extract roda o MinerU antes de indexar; --force reindexa tudo do zero."""
     ap = argparse.ArgumentParser(description="Indexa o texto do MinerU no FTS5.")
     ap.add_argument("--force", action="store_true", help="Reindexa todos os PDFs")
     ap.add_argument("--extract", action="store_true", help="Extrai (MinerU) os pendentes antes de indexar")

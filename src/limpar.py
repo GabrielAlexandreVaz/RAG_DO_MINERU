@@ -100,6 +100,9 @@ def rotacionar_logs(simular=False):
 
 
 def main():
+    """Linha de comando da retenção: aplica o prazo e rotaciona os logs.
+
+    Use --simular antes de mudar o prazo, para ver o que seria apagado."""
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:  # noqa: BLE001

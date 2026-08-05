@@ -2,10 +2,10 @@
 ============================================================================
 atos_pessoal.py · Job — extrai ATOS DE PESSOAL da edição e grava no Oracle
 ----------------------------------------------------------------------------
-Versão genérica do exonerar.py: em vez de gerar um Excel, grava cada ato na
-tabela Oracle 001A. É PARAMETRIZÁVEL POR TEMA (exoneração, nomeação, ...): cada
-tema tem seu padrão de busca (FTS), a pergunta que orienta a IA e o rótulo que
-vai na coluna RESPOSTA — os três derivados da palavra-chave.
+Grava cada ato numa linha da tabela Oracle 001A. É PARAMETRIZÁVEL POR TEMA
+(exoneração, nomeação, ...): cada tema tem seu padrão de busca (FTS), a pergunta
+que orienta a IA e o rótulo que vai na coluna RESPOSTA — os três derivados da
+palavra-chave.
 
 AS PALAVRAS-CHAVE (o que procurar no D.O.) vêm da tabela Oracle 001B — não estão
 mais no código. Para passar a acompanhar um novo tipo de ato, basta um INSERT lá
@@ -194,6 +194,11 @@ def gerar(info, date=None, max_tokens=16000, force=False):
 
 
 def main():
+    """Linha de comando do passo 4/5: grava os atos de pessoal da edição na 001A.
+
+    Resolve a edição ANTES de carregar os temas, porque as palavras-chave da 001B
+    valem por vigência na data da edição. Sai sem erro (e sem gravar) quando o
+    Oracle não está configurado, para não derrubar o pipeline agendado."""
     try:
         sys.stdout.reconfigure(encoding="utf-8")     # acentos no log do Windows
     except Exception:

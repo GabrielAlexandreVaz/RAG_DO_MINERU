@@ -137,9 +137,6 @@ def _pasta(var, padrao):
 # Pasta onde ficam os PDFs do DOERJ — de onde o MinerU lê e onde o download grava.
 DOWNLOADS_DIR = _pasta("DOERJ_DOWNLOADS_DIR", "downloads")
 
-# Pasta onde o job diário salva o Excel das exonerações.
-EXONERACOES_DIR = _pasta("DOERJ_EXONERACOES_DIR", "exoneracoes")
-
 # --- Download do D.O. (Playwright dirige o portal do IOERJ) ------------------
 # O portal não expõe URL estável do PDF; dirigimos um navegador pelo fluxo
 # (última edição -> caderno) e interceptamos a resposta do PDF (mostra_pdf.php).

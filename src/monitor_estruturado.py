@@ -200,6 +200,11 @@ SYSTEM = (
     "- MUNICIPALIDADES_PEDIDO: ato (Partes IV/V) onde a SEFAZ/Rioprevidencia e a publicadora, "
     "contratante ou conveniada. NAO inclua atos de prefeituras ou de outras secretarias (ex.: "
     "SEDEC) so por citarem 'Fazenda' generico.\n"
+    "ANEXOS E TABELAS: anexo de decreto (Anexo I, II, V, VI...), quadro de dotacao orcamentaria, "
+    "limite de empenho ou alteracao de modalidade de aplicacao NAO gera item proprio - o decreto "
+    "ja e o item. Cite no resumo DO DECRETO o objeto e o valor GLOBAL. Se a tabela estiver "
+    "ilegivel no texto (celulas quebradas, numeros partidos), escreva 'valores no anexo do "
+    "decreto' e NAO tente reconstruir cifra nenhuma: numero inventado e pior que numero ausente.\n"
     "CONSOLIDACAO: quando UM MESMO ato (ex.: um despacho do Secretario, um edital) decide/julga "
     "VARIOS itens homogeneos de uma vez (ex.: 'julgamento de N recursos', lista de varios "
     "processos/contribuintes), gere UM UNICO item informando a QUANTIDADE no 'resumo' "
@@ -751,6 +756,65 @@ def _casar_id_doerj(itens, date):
     return casados
 
 
+# --------------------------------------------------------------------------
+# Conferência dos números contra a fonte (anti-alucinação)
+# --------------------------------------------------------------------------
+# Auditoria de 05/08/2026: 3 registros afirmavam cifras que NÃO existem no texto
+# da edição. A causa não foi o modelo inventar do nada — foi a tabela do Anexo V
+# de 28/07 sair partida do MinerU ("<td>10.00</td><td>0 10.000</td>") e a IA
+# "reconstruir" números plausíveis. É o pior erro possível: parece específico e
+# correto. Aqui conferimos cada número do resumo contra o texto da edição.
+#
+# O que isto NÃO pega: dígito trocado que por acaso exista noutro ponto da
+# edição. É rede contra invenção, não contra erro de leitura.
+_RX_MARCADOR = re.compile(r"\[[^\]]*\]")           # trechos que NÓS acrescentamos
+_RX_DATA = re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b")
+_RX_NUMERO_TXT = re.compile(r"\d[\d.,]{3,}\d")
+_MIN_DIGITOS = 5
+
+
+def _numeros_do_resumo(resumo):
+    """Números do resumo que devem existir na fonte -> [(texto original, só dígitos)].
+
+    Ignora o que o próprio código escreveu (marcadores entre colchetes, como
+    '[prazo calculado: ...]'), datas e anos soltos."""
+    texto = _RX_MARCADOR.sub(" ", resumo or "")
+    texto = _RX_DATA.sub(" ", texto)
+    saida, vistos = [], set()
+    for m in _RX_NUMERO_TXT.finditer(texto):
+        bruto = m.group()
+        digitos = re.sub(r"\D", "", bruto)
+        if len(digitos) < _MIN_DIGITOS or re.fullmatch(r"(19|20)\d{2}", digitos):
+            continue
+        if digitos not in vistos:
+            vistos.add(digitos)
+            saida.append((bruto, digitos))
+    return saida
+
+
+def _validar_numeros(itens, date):
+    """Marca os itens cujos números não aparecem na edição. Devolve (itens, números).
+
+    NÃO descarta o item: nos casos vistos o ATO é real e só a cifra é que não se
+    sustenta (o edital de autos de infração de 23/07 existe; o total é que não
+    confere). Descartar perderia ato verdadeiro, e em silêncio."""
+    texto, _, _ = _indice_edicao(date)
+    if not texto:
+        return 0, 0
+    digitos_fonte = re.sub(r"\D", "", texto)
+    n_itens = n_numeros = 0
+    for it in itens:
+        faltando = [bruto for bruto, dig in _numeros_do_resumo(it.get("resumo"))
+                    if dig not in digitos_fonte]
+        if not faltando:
+            continue
+        n_itens += 1
+        n_numeros += len(faltando)
+        it["resumo"] = (f"{(it.get('resumo') or '').strip()} "
+                        f"[valores nao localizados na publicacao: {'; '.join(faltando[:6])}]")
+    return n_itens, n_numeros
+
+
 def _extrair_json(resp):
     """Extrai o objeto JSON da resposta da IA, tolerando o que ela costuma acrescentar.
 
@@ -932,6 +996,12 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     # Id da matéria no DOERJ: liga o registro à publicação oficial.
     n_id = _casar_id_doerj(todos, date)
     print(f"[monitor] Id do DOERJ: {n_id}/{len(todos)} registro(s) casado(s) com a materia")
+
+    # Confere os números do resumo contra o texto da edição (anti-alucinação).
+    n_marc, n_num = _validar_numeros(todos, date)
+    if n_marc:
+        print(f"[ATENCAO] {n_marc} item(ns) com {n_num} numero(s) que NAO existem no texto da "
+              f"edicao -> marcados no resumo (conferir na publicacao).")
     print(f"[monitor] lista de monitorados: {n_vigentes} nome(s) vigente(s) em {date} "
           f"(fonte: {origem})")
     if monit:

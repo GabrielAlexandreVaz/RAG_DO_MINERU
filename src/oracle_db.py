@@ -305,8 +305,14 @@ def save_atos(resposta, edicao_iso, itens):
 #  MONITORAMENTO (8 seções) -> UMA tabela única (002A)
 # ==========================================================================
 # Tamanhos das colunas da 002A (mais apertados que os do Excel).
+# TIPO era VARCHAR2(26) e cortava EXPEDIENTE_PONTO_FACULTATIVO (28 caracteres), a
+# unica das 9 categorias que nao cabia. Como resumo_executivo e export_002a casam
+# o TIPO por igualdade exata contra CATEGORIA_SECAO, o item truncado caia em
+# "(sem secao)" e sumia da secao 5. Nunca apareceu porque a 002A so recebeu a
+# primeira linha dessa categoria em 07/08/2026 (Decreto 50.418, ponto facultativo
+# publicado em edicao extra). Coluna alargada para 32 no banco.
 _LIM_002 = {
-    "TIPO": 26, "TIPO_ATO": 120, "NUMERO_ANO": 56, "ORGAO": 128, "PESSOA": 360,
+    "TIPO": 32, "TIPO_ATO": 120, "NUMERO_ANO": 56, "ORGAO": 128, "PESSOA": 360,
     "CARGO": 104, "PROCESSO": 200, "VIGENCIA": 56, "RESUMO": 704, "CADERNO": 48,
 }
 

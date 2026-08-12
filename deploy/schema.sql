@@ -67,7 +67,9 @@ CREATE TABLE COE_IA."IA0001_IOERJ_RAG_DIARIO_INTELIGENTE_002A" (
     PRAZO        DATE,
     PAGINA       NUMBER,
     DT_CARGA     TIMESTAMP(6),
-    TIPO         VARCHAR2(26)       -- PRAZO_CRITICO, MOVIMENTACAO_PESSOAL, ...
+    TIPO         VARCHAR2(32)       -- PRAZO_CRITICO, MOVIMENTACAO_PESSOAL, ...
+                                    -- 32 e nao 26: EXPEDIENTE_PONTO_FACULTATIVO
+                                    -- tem 28 e era truncado (some da secao 5).
 );
 
 -- --------------------------------------------------------------------------

@@ -88,6 +88,108 @@ def _forcar_categoria_por_caderno(itens):
     return n
 
 
+# Vocabulário fechado de TIPO_ATO para movimentação de pessoal. O rótulo do ato é
+# derivado do RESUMO, não aceito da IA: o SYSTEM descreve a `categoria` em detalhe
+# mas nunca definiu `tipo_ato`, e o modelo preenchia por conta própria. Na edição de
+# 07/08/2026 a exoneração de ANTONIO CARLOS DE BARROS BASILIO (SEI-040008/000792/2026)
+# abria uma sequência de 8 nomeações na p.3 e saiu rotulada "Nomeação" — com o resumo
+# dizendo "Exoneração do cargo em comissão". A 001A, cujo rótulo vem do código e não
+# do modelo, acertou o mesmo ato. Mesma regra do prazo: o que o código consegue
+# conferir, o código confere.
+#
+# Cada entrada é (rótulo canônico, radicais que o denunciam no texto). A ordem importa
+# só para o desempate abaixo; o critério real é qual radical aparece PRIMEIRO no resumo.
+_TIPOS_PESSOAL = [
+    ("Exoneração",    ("exonera",)),
+    ("Nomeação",      ("nomea", "nomeia")),
+    ("Designação",    ("designa",)),
+    ("Cessão",        ("cede ", "cessao", "cedid")),
+    ("Remoção",       ("remove", "remocao", "removid")),
+    ("Transferência", ("transfer",)),
+    ("Aposentadoria", ("aposenta",)),
+    ("Dispensa",      ("dispensa",)),
+]
+
+
+# Marcadores de ato que DESFAZ outro ato. Sem isto a regra abaixo inverteria o
+# sentido: "Cessados os efeitos da designação para substituir o Titular da JRF"
+# (RENATA CARNEIRO DA SILVA RIBEIRO, 28/07/2026) casa o radical "designa" e viraria
+# "Designação" — o oposto do que o D.O. publicou. Quando um destes vem ANTES do
+# radical do ato, o código se cala e mantém o rótulo da IA, que nesses casos veio
+# certo ("Cessação de Designação").
+_DESFAZ = ("cessad", "cessa os efeitos", "cessacao", "torna sem efeito",
+           "tornado sem efeito", "tornar sem efeito", "revoga", "anula")
+
+
+def _tipo_pelo_resumo(resumo):
+    """Rótulo canônico do ato a partir do resumo, ou None se não der para afirmar.
+
+    Vale o radical que aparece MAIS CEDO no texto: o resumo de uma exoneração cita a
+    nomeação seguinte ("Exoneração ... em vaga a ser preenchida por nomeação"), e vice-
+    versa. O ato é o que a frase abre, não o que ela menciona de passagem.
+
+    Devolve None quando o ato é a CESSAÇÃO/REVOGAÇÃO de outro ato — o vocabulário não
+    tem rótulo para isso e um palpite aqui inverteria o sentido."""
+    txt = _norm(resumo)
+    if not txt.strip():
+        return None
+    achados = []
+    for rotulo, radicais in _TIPOS_PESSOAL:
+        pos = min((txt.find(r) for r in radicais if txt.find(r) >= 0), default=-1)
+        if pos >= 0:
+            achados.append((pos, rotulo))
+    if not achados:
+        return None
+    pos_ato = min(achados)[0]
+    desfaz = min((txt.find(d) for d in _DESFAZ if txt.find(d) >= 0), default=-1)
+    if 0 <= desfaz < pos_ato:
+        return None
+    return min(achados)[1]
+
+
+def _ato_no_texto(rotulo, resumo):
+    """True se algum radical do ato `rotulo` aparece no resumo (em qualquer posição)."""
+    txt = _norm(resumo)
+    radicais = dict(_TIPOS_PESSOAL).get(rotulo, ())
+    return any(r in txt for r in radicais)
+
+
+def _normalizar_tipo_ato(itens):
+    """Reescreve o `tipo_ato` das movimentações de pessoal a partir do resumo.
+
+    Devolve (nº de inversões corrigidas, nº de rótulos só padronizados). A separação
+    existe para o log: inversão é erro de leitura da IA e merece destaque; grafia
+    ('NOMEAÇÃO', 'Nomeação para cargo em comissão') é só ruído de vocabulário, que
+    antes chegava ao banco — a 002A acumulou 21 rótulos distintos para ~8 tipos.
+
+    Só age quando o resumo nomeia um ato do vocabulário. Item cujo resumo não casa
+    (portaria de lotação, ato do secretário) fica com o rótulo da IA: sem evidência
+    no texto, o palpite do modelo é melhor do que um rótulo inventado pelo código."""
+    invertidos = padronizados = 0
+    for it in itens:
+        if (it.get("categoria") or "").strip().upper() != "MOVIMENTACAO_PESSOAL":
+            continue
+        canon = _tipo_pelo_resumo(it.get("resumo"))
+        if not canon:
+            continue
+        atual = (it.get("tipo_ato") or "").strip()
+        if atual == canon:
+            continue
+        it["tipo_ato"] = canon
+        # Inversão = o rótulo antigo nomeava um ato que NÃO ESTÁ no resumo (a IA disse
+        # "Nomeação" para um texto que só fala em exoneração). Se o resumo cita os dois
+        # — o ato composto "Exoneração do cargo X e nomeação para o cargo Y" — o rótulo
+        # antigo era defensável e isto é só padronização, não erro de leitura.
+        outro = _tipo_pelo_resumo(atual)
+        if outro not in (None, canon) and not _ato_no_texto(outro, it.get("resumo")):
+            invertidos += 1
+            print(f"[monitor]   tipo_ato corrigido: a IA disse '{atual}', o resumo diz "
+                  f"'{canon}' ({(it.get('pessoa') or '?')[:60]})")
+        else:
+            padronizados += 1
+    return invertidos, padronizados
+
+
 def _canon_categoria(cat):
     """Normaliza a categoria vinda da IA para o conjunto canonico. O modelo as vezes
     erra a grafia (ex.: 'OBSERVACAO_EXECUTIVE' sem o 'A'); aqui casamos pelo mais
@@ -145,6 +247,12 @@ SYSTEM = (
     "categoria = UMA de: PRAZO_CRITICO | MOVIMENTACAO_PESSOAL | NOMES_MONITORADOS | "
     "OBSERVACAO_EXECUTIVA | DESTAQUE_CONTROLE_INTERNO | EXPEDIENTE_PONTO_FACULTATIVO | "
     "TCE_SEFAZ | LEGISLATIVO_FAZENDARIO | MUNICIPALIDADES_PEDIDO.\n"
+    "tipo_ato = o que o ato E, em 1-3 palavras (Exoneracao, Nomeacao, Designacao, Cessao, "
+    "Remocao, Transferencia, Aposentadoria, Dispensa, Portaria, Decreto, Termo Aditivo, "
+    "Apostila, Despacho, Edital de Convocacao, Pregao Eletronico, Projeto de Lei...). "
+    "ATENCAO nos atos de pessoal: uma pagina do D.O. traz varias nomeacoes seguidas e UMA "
+    "exoneracao no meio - leia o VERBO DO ATO que voce esta extraindo, nao o dos vizinhos. "
+    "Se o resumo comeca com 'Exoneracao de...', tipo_ato e 'Exoneracao'.\n"
     "Guia de categoria:\n"
     "- PRAZO_CRITICO: ato SEFAZ/Rioprevidencia que gera acao/prazo (sessao de julgamento, "
     "vencimento, verificacao, disponibilizacao de acordao no portal, licenca com inicio/fim, "
@@ -833,8 +941,28 @@ def _extrair_json(resp):
     return json.loads(text)
 
 
-def _mapear_bloco(caderno, paginas, client, max_tokens=8000, date=None):
-    """Uma chamada à IA sobre um bloco de páginas de um caderno. Devolve (itens, usage).
+# Teto de tokens da RESPOSTA de um bloco. A saída é um JSON com um objeto por ato,
+# então um bloco denso enche isso depressa: na edição de 10/08/2026 o bloco das
+# páginas 31-33 (13 portarias de PCAN da SUPFINF + 2 de sindicância da CTCE, quase
+# idênticas entre si) fechou em 7.962 tokens de saída — a 38 do teto antigo, de
+# 8.000. Na rodada do job aquele bloco estourou o teto, o JSON voltou cortado no
+# meio e os 26 itens foram descartados EM SILÊNCIO, com o relatório saindo
+# "COMPLETO". Daí o teto mais alto E o tratamento de truncamento abaixo: número
+# fixo nenhum resolve sozinho, porque a edição seguinte pode trazer 40 portarias.
+MAX_TOKENS_BLOCO = 16000
+
+# Quantas vezes um bloco de UMA página pode ter o teto dobrado antes de desistir.
+# Só entra em ação quando não há mais como partir o bloco (uma página não se divide).
+_MAX_DOBRAS_TETO = 2
+
+
+def _chamar_ia(caderno, paginas, client, max_tokens, date):
+    """UMA chamada à IA sobre um bloco. Devolve (itens, usage, status).
+
+    `status` é "ok" (JSON válido), "truncado" (a resposta bateu no teto de tokens e
+    veio cortada) ou "falha" (a API não respondeu depois das tentativas, ou
+    respondeu algo que não é JSON). Separar "truncado" de "falha" é o ponto: o
+    truncado TEM conserto — partir o bloco e refazer — e a falha não.
 
     `date` (a edição) vai no prompt porque metade dos prazos do D.O. é contada "a
     partir da publicação": sem a data da edição o modelo não tem como fechar a
@@ -846,14 +974,14 @@ def _mapear_bloco(caderno, paginas, client, max_tokens=8000, date=None):
         if txt:
             blocos.append(f"[pagina {p['page']}]\n{txt}")
     if not blocos:
-        return [], {"input": 0, "output": 0}, True
+        return [], {"input": 0, "output": 0}, "ok"
     corpo = "\n\n----------\n\n".join(blocos)
     edicao = f" publicada em {_data_br(date)}" if date else ""
     prompt = (f"Caderno: {caderno}\nEdicao do DOERJ{edicao}.\n\nTrechos:\n\n{corpo}\n\n"
               "Lembre-se: responda apenas com o objeto JSON.")
     # Resiliência: a Azure Foundry às vezes falha (timeout/5xx/rate-limit). Tenta
-    # até 5x com backoff exponencial; se ainda falhar, PULA o bloco (ok=False) e
-    # o relatório sai como PARCIAL (sem derrubar tudo). Devolve (itens, usage, ok).
+    # até 5x com backoff exponencial; se ainda falhar, PULA o bloco e o relatório
+    # sai como PARCIAL (sem derrubar tudo).
     cli = client.with_options(timeout=180.0)
     resp = None
     for tentativa in range(1, 6):
@@ -872,16 +1000,78 @@ def _mapear_bloco(caderno, paginas, client, max_tokens=8000, date=None):
                 time.sleep(espera)
     if resp is None:
         print(f"[monitor]   bloco de '{caderno}' PULADO apos 5 falhas de IA.", flush=True)
-        return [], {"input": 0, "output": 0}, False
+        return [], {"input": 0, "output": 0}, "falha"
+
+    usage = {"input": resp.usage.input_tokens, "output": resp.usage.output_tokens}
+    paginas_rotulo = ", ".join(str(p["page"]) for p in paginas)
+
+    # Resposta cortada no teto: NÃO tente ler o JSON (ele está incompleto por
+    # definição). Antes o código só tentava o parse e engolia a exceção.
+    if resp.stop_reason == "max_tokens":
+        print(f"[ATENCAO] resposta TRUNCADA no teto de {max_tokens} tokens "
+              f"(paginas {paginas_rotulo} de '{caderno}').", flush=True)
+        return [], usage, "truncado"
+
     try:
         data = _extrair_json(resp)
         itens = data.get("itens", []) or []
-    except Exception:
-        itens = []
+    except Exception as e:  # noqa: BLE001
+        # Não é truncamento e não é JSON: o bloco vira FALHA, e não zero itens em
+        # silêncio. Com ok=False a rodada sai PARCIAL, que não sobrescreve o
+        # relatório canônico nem grava na 002A.
+        texto = "".join(b.text for b in resp.content if b.type == "text")
+        print(f"[ATENCAO] resposta da IA nao e JSON valido "
+              f"(paginas {paginas_rotulo} de '{caderno}'): {type(e).__name__}: {str(e)[:120]}. "
+              f"Inicio da resposta: {texto[:160]!r}", flush=True)
+        return [], usage, "falha"
+
     for it in itens:
         it["caderno"] = caderno
-    usage = {"input": resp.usage.input_tokens, "output": resp.usage.output_tokens}
-    return itens, usage, True
+    return itens, usage, "ok"
+
+
+def _somar_usage(*usos):
+    """Soma os tokens de várias chamadas (um bloco partido gasta em mais de uma)."""
+    return {"input": sum(u["input"] for u in usos), "output": sum(u["output"] for u in usos)}
+
+
+def _mapear_bloco(caderno, paginas, client, max_tokens=MAX_TOKENS_BLOCO, date=None,
+                  _dobras=0):
+    """Extrai os itens de um bloco de páginas, partindo o bloco se a saída truncar.
+
+    Devolve (itens, usage, ok). Quando a resposta bate no teto de tokens, o bloco é
+    dividido ao meio e cada metade refeita — o custo cresce só onde a densidade
+    exige, em vez de pagar um teto gigante em todo bloco. Numa página única, que
+    não se divide, o teto é dobrado até `_MAX_DOBRAS_TETO` vezes.
+
+    ok=False só quando ainda assim não deu: aí a rodada inteira sai PARCIAL."""
+    itens, usage, status = _chamar_ia(caderno, paginas, client, max_tokens, date)
+    if status == "ok":
+        return itens, usage, True
+    if status == "falha":
+        return [], usage, False
+
+    # --- truncado: primeiro tenta partir o bloco ---
+    if len(paginas) > 1:
+        meio = len(paginas) // 2
+        print(f"[monitor]   partindo o bloco em {[p['page'] for p in paginas[:meio]]} + "
+              f"{[p['page'] for p in paginas[meio:]]} e refazendo.", flush=True)
+        itens_a, uso_a, ok_a = _mapear_bloco(caderno, paginas[:meio], client, max_tokens, date)
+        itens_b, uso_b, ok_b = _mapear_bloco(caderno, paginas[meio:], client, max_tokens, date)
+        return itens_a + itens_b, _somar_usage(usage, uso_a, uso_b), (ok_a and ok_b)
+
+    # --- página única: não há o que partir, então dobra o teto ---
+    if _dobras < _MAX_DOBRAS_TETO:
+        novo = max_tokens * 2
+        print(f"[monitor]   pagina {paginas[0]['page']} sozinha truncou; "
+              f"repetindo com teto de {novo} tokens.", flush=True)
+        itens_r, uso_r, ok_r = _mapear_bloco(caderno, paginas, client, novo, date,
+                                             _dobras=_dobras + 1)
+        return itens_r, _somar_usage(usage, uso_r), ok_r
+
+    print(f"[ATENCAO] pagina {paginas[0]['page']} de '{caderno}' continua truncando com "
+          f"{max_tokens} tokens de teto -> bloco PERDIDO. Relatorio sai PARCIAL.", flush=True)
+    return [], usage, False
 
 
 def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
@@ -992,6 +1182,14 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     n_corr = _forcar_categoria_por_caderno(todos)
     if n_corr:
         print(f"[monitor] {n_corr} item(ns) reclassificado(s) pela secao do proprio caderno.")
+
+    # O rótulo do ato de pessoal sai do resumo, não do palpite da IA.
+    n_inv, n_pad = _normalizar_tipo_ato(todos)
+    if n_inv:
+        print(f"[ATENCAO] {n_inv} ato(s) de pessoal com tipo_ato INVERTIDO pela IA -> "
+              "corrigido(s) pelo resumo (ver linhas acima).")
+    if n_pad:
+        print(f"[monitor] {n_pad} tipo(s) de ato padronizado(s) no vocabulario canonico.")
 
     # Id da matéria no DOERJ: liga o registro à publicação oficial.
     n_id = _casar_id_doerj(todos, date)

@@ -74,6 +74,35 @@ python src/app.py            # http://127.0.0.1:5001
 
 `reindex.bat` extrai (MinerU) e reindexa tudo — bom para uma Tarefa Agendada diária.
 
+## Saídas do monitor: Excel e boletim HTML
+
+A leitura do dia (passo 5 do pipeline) produz **dois arquivos com os mesmos itens**, em
+`relatorios/`:
+
+| Arquivo | Para quê |
+|---|---|
+| `monitoramento_<data>.xlsx` | conferência: uma aba por seção, todas as colunas |
+| `boletim_<data>.html` | leitura: o formato do e-mail `[DOERJ] Monitoramento SEFAZ` |
+
+O boletim (`src/boletim.py`) **não gasta IA**: é só outro formato dos itens que o monitor já
+extraiu. Sai junto com o Excel e, numa rodada parcial, vira `boletim_<data>_PARCIAL.html`, com o
+aviso em vermelho no topo — a mesma regra do Excel.
+
+Para refazer o boletim de uma edição já processada (lendo a 002A, sem chamar a IA):
+
+```bash
+python src/boletim.py                     # última edição gravada
+python src/boletim.py --date 2026-08-14
+```
+
+O cabeçalho (número da edição, governador, secretário de Fazenda) é lido do texto da página 1 —
+o que o MinerU não trouxer naquele dia simplesmente não aparece na linha, em vez de sair
+inventado.
+
+Não confundir com `src/resumo_executivo.py`, que gera outro documento a partir da mesma 002A: lá
+as séries homogêneas são consolidadas e cada item vem com a matriz de rastreabilidade, para a
+validação da área. O boletim é a leitura item a item.
+
 ## Palavras-chave dos atos de pessoal
 
 `src/atos_pessoal.py` procura no D.O. os atos de pessoal e grava na **001A**. O que ele procura vem

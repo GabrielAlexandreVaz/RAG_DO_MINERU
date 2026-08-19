@@ -1074,6 +1074,27 @@ def _mapear_bloco(caderno, paginas, client, max_tokens=MAX_TOKENS_BLOCO, date=No
     return [], usage, False
 
 
+def _boletim_da_002a(date, destino):
+    """Gera o boletim HTML da edição a partir da 002A, se ele ainda não existir.
+
+    Usado no caminho da trava de idempotência (o job roda de hora em hora e a
+    edição já foi lida): o Excel e a 002A estão prontos, o boletim é só outro
+    formato dos mesmos itens — não custa IA nenhuma."""
+    arquivo = Path(destino) / f"boletim_{date}.html"
+    if arquivo.exists():
+        return
+    if not (oracle_db.configurado() and config.oracle_settings().get("table_monitor")):
+        return
+    try:
+        import boletim
+        registros = oracle_db.listar_monitoramento(date)
+        if registros:
+            boletim.gerar(date=date, itens=boletim.de_002a(registros), destino=destino)
+    except Exception as e:  # noqa: BLE001 - formato a mais nunca derruba o job
+        print(f"[ATENCAO] falha ao gerar o boletim HTML a partir da 002A: "
+              f"{type(e).__name__}: {str(e)[:200]}")
+
+
 def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     """Monta o monitoramento de UMA edição: Excel com 8 abas + gravação na 002A.
 
@@ -1114,6 +1135,10 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     canonico = destino / f"monitoramento_{date}.xlsx"
     if canonico.exists() and not force:
         print(f"[monitor] {canonico.name} ja existe -> pulando (use --force para refazer).")
+        # O boletim HTML nao gasta IA: se ele ainda nao existe (edicao processada
+        # antes deste modulo, ou execucao anterior sem Oracle), monta a partir da
+        # 002A em vez de deixar o dia sem boletim.
+        _boletim_da_002a(date, destino)
         return canonico
 
     client = config.get_client()
@@ -1217,6 +1242,16 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     sufixo = "" if completo else "_PARCIAL"
     arquivo = destino / f"monitoramento_{date}{sufixo}.xlsx"
     _build_xlsx(arquivo, date, todos, blocos_total, blocos_falha)
+    # Mesma extracao, outro formato: o boletim HTML no layout do e-mail. Sai dos
+    # itens em MEMORIA (nao depende do Oracle) e segue a mesma regra do Excel:
+    # rodada parcial vira boletim_<data>_PARCIAL.html.
+    try:
+        import boletim
+        boletim.gerar(date=date, itens=todos, destino=destino, n_monitorados=n_vigentes,
+                      parcial=not completo, blocos_falha=blocos_falha,
+                      blocos_total=blocos_total)
+    except Exception as e:  # noqa: BLE001 - o boletim e um formato a mais, nao derruba o job
+        print(f"[ATENCAO] falha ao gerar o boletim HTML: {type(e).__name__}: {str(e)[:200]}")
     if completo:
         print(f"[ok] Excel COMPLETO gerado -> {arquivo}")
     else:

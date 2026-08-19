@@ -13,7 +13,9 @@ Etapas:
   2) MinerU + indice -> index_build.py --latest (idempotente: pula se ja indexou).
   3) Cadernos leves IB/II/IV/V -> ler_cadernos.py (indexa sem salvar PDF).
   4) Atos de pessoal -> Oracle 001A -> atos_pessoal.py (pula se ja gravado).
-  5) Monitor 8 temas -> Excel + Oracle 002A -> monitor_estruturado.py.
+  5) Monitor 8 temas -> Excel + boletim HTML + Oracle 002A -> monitor_estruturado.py.
+     O boletim (relatorios/boletim_<data>.html) e a MESMA extracao no formato do
+     e-mail de monitoramento; sai junto com o Excel, sem chamada extra de IA.
   +) Limpeza (retenção de disco) -> limpar.py. Também não derruba o pipeline.
 
 O Excel diário das exonerações saiu do pipeline: as exonerações já vão para a
@@ -107,9 +109,9 @@ def main():
     _run("4/5 Atos de pessoal -> Oracle (001A)",
          [rag_py, src / "atos_pessoal.py", "--tema", args.tema] + forca)
 
-    # 4) Monitor estruturado (8 temas) -> Excel + Oracle (002A). Usa o MONITOR_MODEL
+    # 4) Monitor estruturado (8 temas) -> Excel + boletim HTML + Oracle (002A). Usa o MONITOR_MODEL
     #    (Haiku, mais barato). Idempotente: pula se o Excel canonico do dia ja existe.
-    _run("5/5 Monitor 8 temas -> Excel + Oracle (002A)",
+    _run("5/5 Monitor 8 temas -> Excel + boletim HTML + Oracle (002A)",
          [rag_py, src / "monitor_estruturado.py"] + forca)
 
     # 6) Retencao de disco. NAO usa _run: falha de limpeza nao pode marcar como

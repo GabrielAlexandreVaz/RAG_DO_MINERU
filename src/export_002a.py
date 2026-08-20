@@ -26,7 +26,7 @@ from pathlib import Path
 
 import config
 import oracle_db
-from monitor_estruturado import CATEGORIA_SECAO, SECOES
+from monitor_estruturado import CATEGORIA_SECAO, SECOES, mascarar_cpf
 
 COLUNAS = ["ID", "ID_DOERJ", "TIPO", "TIPO_ATO", "NUMERO_ANO", "ORGAO", "PESSOA", "CARGO", "PROCESSO",
            "VIGENCIA", "RESUMO", "CADERNO", "PAGINA", "DATA_EDICAO", "DATA_ATO", "PRAZO"]
@@ -86,7 +86,8 @@ def gerar(date=None, destino=None):
             else:
                 # write_string sempre: texto que parece numero ou comeca com '='
                 # nao pode virar numero/formula (ver monitor_estruturado._build_xlsx).
-                ws.write_string(li, c, "" if v is None else str(v), f_cel)
+                # O CPF transcrito do D.O. sai mascarado, como no Excel do monitor.
+                ws.write_string(li, c, mascarar_cpf(v), f_cel)
     for c, w in enumerate(LARGURAS[:len(cabec)]):
         ws.set_column(c, c, w)
     ws.freeze_panes(1, 0)

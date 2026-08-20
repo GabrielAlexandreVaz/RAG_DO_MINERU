@@ -98,12 +98,55 @@ def mais_recente(pdfs):
     return max(pdfs, key=chave)
 
 
+# ============================================================================
+#  Lixo de fonte: glifos que vazam como caracteres de controle
+# ============================================================================
+# A tarja do IOERJ no alto de cada página do DOERJ usa uma fonte embutida (subset)
+# sem ToUnicode CMap utilizável. Com MINERU_METHOD=txt (camada de texto do PDF,
+# sem OCR) o que sai daquele bloco não são letras: são os ÍNDICES DE GLIFO crus,
+# U+0001..U+001B. "DIÁRIO OFICIAL DO ESTADO DO RIO DE JANEIRO" chega como
+# "\x01-Á\x03-\x04 \x04\x05-\x06-\x07\x08 ...", onde \x01=D, '-'=I, \x03=R, \x04=O.
+# Acentuadas como Á e Ç escapam porque vêm de outra fonte.
+#
+# É sistemático (4.466 blocos header/page_number nas 23 edições extraídas), e o
+# estrago não é estético: o cabeçalho fica, na ordem do content_list, ENTRE o
+# último ato de uma página e a continuação dele na página seguinte. A IA, que
+# transcreve com FIDELIDADE, copiava o lixo para dentro do RESUMO como se fosse a
+# continuação do ato (edição de 18/08, ato do Subsecretário Adjunto: o texto
+# terminava em "para," e emendava o cabeçalho). No HTML nada disso aparece — o
+# navegador não renderiza U+0001..U+001F —, então o boletim saía com um rastro de
+# hifens e acentos soltos e ninguém via a causa.
+#
+# Não dá para decodificar: o índice de glifo muda de fonte para fonte. Mas também
+# não se pode descartar todo bloco 'header': em 12 das 23 edições a linha
+# "ANO LII - Nº 149" da página 1 — de onde `boletim.cabecalho_edicao` tira o número
+# da edição — vem num 'header' LEGÍVEL, e às vezes num bloco misto (parte glifo
+# cru, parte texto bom). Por isso a regra é por CONTEÚDO, não por tipo: limpa
+# sempre e só descarta o bloco quando sobrou menos do que se jogou fora.
+_RX_CONTROLE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def limpar_controle(texto):
+    """Tira os caracteres de controle do texto (mantém \\t, \\n e \\r)."""
+    return _RX_CONTROLE.sub("", texto or "")
+
+
+def _e_lixo_de_fonte(texto):
+    """True se o bloco é cabeçalho ilegível: mais glifo cru do que letra legível."""
+    controle = len(_RX_CONTROLE.findall(texto or ""))
+    if not controle:
+        return False
+    legivel = sum(c.isalnum() for c in limpar_controle(texto))
+    return controle > legivel
+
+
 def _elem_text(e):
     """Junta o texto pesquisável de UM elemento do content_list.
 
     O MinerU classifica cada bloco por 'type' (text, table, image...). Aqui
     reunimos o que interessa para busca: o texto, o corpo da tabela (HTML) e as
-    legendas de tabela/imagem."""
+    legendas de tabela/imagem. Bloco que é só glifo cru sai como '' e a página
+    nem o vê (ver _e_lixo_de_fonte)."""
     partes = []
     if e.get("text"):
         partes.append(e["text"])
@@ -115,7 +158,10 @@ def _elem_text(e):
             partes.extend(str(x) for x in val if x)
         elif val:
             partes.append(str(val))
-    return "\n".join(partes).strip()
+    texto = "\n".join(partes).strip()
+    if _e_lixo_de_fonte(texto):
+        return ""
+    return limpar_controle(texto).strip()
 
 
 def page_texts(content_list_path):
@@ -167,7 +213,10 @@ def index_pdf(con, pdf_path, force=False, extract=False):
     try:
         for page_idx in range(doc.page_count):
             m = (paginas.get(page_idx, "") or "").strip()      # texto do MinerU
-            p = doc[page_idx].get_text("text").strip()         # texto do PDF
+            # O PyMuPDF lê a MESMA camada de texto do PDF, então o cabeçalho vem
+            # com o mesmo glifo cru: limpar aqui também, ou o fallback reintroduz
+            # o lixo justamente nas páginas em que o MinerU já falhou.
+            p = limpar_controle(doc[page_idx].get_text("text")).strip()   # texto do PDF
             if len(p) > 500 and len(m) < FALLBACK_RATIO * len(p):
                 texto = p                                       # MinerU perdeu -> usa o PDF
                 fallback += 1
@@ -215,7 +264,7 @@ def index_caderno_bytes(con, caderno, date, pdf_bytes, chave="parte"):
     n = 0
     try:
         for page_idx in range(doc.page_count):
-            texto = doc[page_idx].get_text("text").strip()
+            texto = limpar_controle(doc[page_idx].get_text("text")).strip()
             if texto:
                 con.execute(
                     "INSERT INTO pages(pdf, caderno, date, page, content) VALUES (?,?,?,?,?)",

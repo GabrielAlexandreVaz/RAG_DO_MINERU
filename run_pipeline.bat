@@ -7,7 +7,7 @@ REM    1) download_diario  -> baixa o D.O. do dia (Playwright)
 REM    2) index_build --latest -> MinerU extrai + indexa a Parte I
 REM    3) ler_cadernos     -> indexa os cadernos IB/II/IV/V
 REM    4) atos_pessoal     -> atos de pessoal no Oracle (001A)
-REM    5) monitor_estruturado -> monitor 8 temas no Oracle (002A) + Excel
+REM    5) monitor_estruturado -> monitor 8 temas no Oracle (002A) + Excel + boletim HTML
 REM  Log de cada execucao em logs\pipeline.log.
 REM  Agende com deploy\instalar_tarefa.bat (Seg-Sex, de hora em hora a partir das 08:05).
 REM

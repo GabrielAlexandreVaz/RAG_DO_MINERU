@@ -12,9 +12,14 @@ no .env usa o valor-padrão definido abaixo (o 2º argumento de os.getenv).
 ============================================================================
 """
 import os                          # ler variáveis de ambiente (do sistema / .env)
+import re                          # separar listas do .env (destinatários de e-mail)
 from pathlib import Path           # manipular caminhos de arquivo de forma segura
 
 from dotenv import load_dotenv     # lê o arquivo .env e joga no ambiente
+
+# O que conta como "sim" numa chave booleana do .env (quem preenche escreve em
+# português tanto quanto em inglês).
+_SIM = {"1", "true", "yes", "sim"}
 
 # ROOT = a pasta raiz do projeto (uma acima de /src). Path(__file__) é este
 # arquivo; .resolve() vira caminho absoluto; .parent.parent sobe dois níveis
@@ -99,6 +104,89 @@ def oracle_settings():
     }
 
 
+def _lista_emails(valor):
+    """'a@x; b@y , c@z' -> ['a@x','b@y','c@z'] (aceita ponto-e-vírgula e vírgula).
+
+    O ponto-e-vírgula entra porque é o que o Outlook usa: quem preencher o .env
+    copiando do campo "Para" do Outlook cola com ';' e não perceberia o erro."""
+    return [e.strip() for e in re.split(r"[;,]", valor or "") if e.strip()]
+
+
+# As duas constantes do AutorizadorClient (o `autorizador.ambiente` escolhe).
+AUTORIZADOR_URLS = {
+    "beta": "https://beta-autorizador-service.fazenda.rj.gov.br/autorizador",
+    "prd": "https://autorizador-service.fazenda.rj.gov.br/autorizador",
+}
+AUTORIZADOR_ENDPOINT = "/api/v1/usuario/autenticar"
+
+
+def _autorizador_url(ambiente):
+    """URL de autenticação do autorizador ('' se o ambiente for desconhecido).
+
+    O AutorizadorClient levanta IllegalArgumentException num ambiente que não
+    seja beta/prd. Aqui devolvemos vazio e quem for usar é que dá o recado:
+    config não é lugar de derrubar nada — o passo 7 avisa e o pipeline segue."""
+    base = AUTORIZADOR_URLS.get(str(ambiente).lower(), "")
+    return base + AUTORIZADOR_ENDPOINT if base else ""
+
+
+def email_settings():
+    """Relê as configurações de e-mail do .env AGORA (override) e devolve um dict.
+
+    O envio NÃO é mais SMTP: o boletim vai num POST para a API corporativa de
+    e-mail (a mesma que os sistemas Java usam via `EmailClient`), com
+    `Authorization: Bearer <token>` e o corpo no formato do `EmailRequestDTO`
+    ({to, from, subject, corpo, sistema}).
+
+    Mesma razão de oracle_settings() para reler o arquivo: a URL e o token podem
+    ser preenchidos depois, sem reiniciar nada — o job agendado relê a cada
+    execução.
+
+    `ativo` é a chave-mestra: com ela em false, o envio MONTA a requisição e a
+    grava em disco para conferência em vez de chamar a API. É o que permite o
+    passo entrar em produção antes de existir credencial."""
+    load_dotenv(ROOT / ".env", override=True)
+    # UMA variável para as duas coisas, como o `autorizador.ambiente` do Java:
+    # escolhe a URL do autorizador E libera (só em 'prd') o domínio externo.
+    ambiente = (os.getenv("AUTORIZADOR_AMBIENTE", "")
+                or os.getenv("EMAIL_AMBIENTE", "") or "beta").strip()
+    return {
+        "ativo": os.getenv("EMAIL_ENVIO_ATIVO", "false").strip().lower() in _SIM,
+        # --- API de e-mail (o `apps.email` do EmailClientProperties) ---
+        "url": os.getenv("EMAIL_API_URL", "").strip(),
+        # A credencial de ENTRADA do autorizador (o `token` do
+        # EmailClientProperties / o `autorizador.token` do YAML). O nome antigo
+        # EMAIL_API_TOKEN continua valendo para não quebrar .env já preenchido.
+        "token": (os.getenv("AUTORIZADOR_TOKEN", "")
+                  or os.getenv("EMAIL_API_TOKEN", "")).strip(),
+        "timeout": int(os.getenv("EMAIL_API_TIMEOUT_S", "30").strip() or 30),
+        # Vai no campo `sistema` do DTO — é como a API identifica quem chamou
+        # (equivale ao ${spring.application.name} do EmailService).
+        "sistema": os.getenv("EMAIL_SISTEMA", "RAG_DOERJ").strip(),
+        # --- Autorizador (espelha AutorizadorClient) ---
+        # O EMAIL_API_TOKEN acima NÃO é aceito pela API de e-mail: ele é a
+        # credencial de entrada do autorizador, que a troca por um token de
+        # verdade. A URL sai do ambiente (as duas constantes do AutorizadorClient);
+        # preencher AUTORIZADOR_URL só é preciso se esse endereço mudar.
+        "autorizador_url": (os.getenv("AUTORIZADOR_URL", "").strip()
+                            or _autorizador_url(ambiente)),
+        # --- Trava de domínio (o validarDominio do EmailClient) ---
+        # Fora de 'prd', só pode sair e-mail para domínio interno. O padrão é
+        # 'beta' de propósito: numa máquina sem o .env ajustado, o comportamento
+        # seguro é o restritivo.
+        "ambiente": ambiente,
+        "dominios_internos": [d.strip().lower() for d in re.split(
+            r"[;,]", os.getenv("EMAIL_DOMINIOS_INTERNOS",
+                               "fazenda.rj.gov.br,redhat.com")) if d.strip()],
+        # --- Quem envia, quem recebe ---
+        "remetente": os.getenv("EMAIL_REMETENTE", "").strip(),
+        "destinatarios": _lista_emails(os.getenv("EMAIL_DESTINATARIOS", "")),
+        "copia": _lista_emails(os.getenv("EMAIL_COPIA", "")),
+        "assunto_prefixo": os.getenv("EMAIL_ASSUNTO_PREFIXO",
+                                     "[DOERJ] Monitoramento SEFAZ").strip(),
+    }
+
+
 def nomes_monitorados():
     """Lê a lista de nomes de monitorados.txt (um por linha; # = comentário).
 
@@ -160,7 +248,28 @@ CADERNOS = [
 
 # Nome do caderno da Parte I (usado para rotular no indice as paginas do MinerU).
 CADERNO_PARTE_I = "Parte I (Poder Executivo)"
-DOWNLOAD_HEADLESS = os.getenv("DOWNLOAD_HEADLESS", "true").strip().lower() in {"1", "true", "yes", "sim"}
+
+# --- Edição EXTRA -----------------------------------------------------------
+# Em alguns dias o IOERJ publica uma edição EXTRA. Ela NÃO é uma data nova: sai na
+# MESMA página de seleção, como um link A MAIS. Verificado na edição de 07/08/2026,
+# em que o portal listou seis cadernos, o segundo sendo
+# "Parte I (Poder Executivo) EDIÇÃO EXTRA".
+#
+# Toda a cadeia de travas do pipeline tem a DATA como chave, então, sem isto, a
+# extra é perdida em silêncio: o download vê o PDF do dia no disco e sai por cache,
+# e o monitor vê o Excel do dia e sai antes da IA. Foi o que aconteceu em 07/08 —
+# aquela edição teve de ser baixada e indexada à mão.
+#
+# O padrão abaixo é sobrescrivível pelo .env de propósito: se um dia o portal mudar
+# a redação do link, ajusta-se a chave e pronto — e, enquanto isso, o downloader
+# REGISTRA NO LOG o texto de todos os links da página, inclusive os que não
+# reconheceu, para que a variante nova apareça em vez de sumir.
+EXTRA_ATIVO = os.getenv("DOERJ_EXTRA_ATIVO", "true").strip().lower() in _SIM
+EXTRA_MATCH = os.getenv("DOERJ_EXTRA_MATCH", r"edi[cç][ãa]o\s*extra|suplement|especial").strip()
+# Sufixo do rótulo do caderno extra no índice e na coluna CADERNO da 002A. Sem
+# acento porque é assim que a linha de 07/08/2026 já está gravada no índice.
+EXTRA_CADERNO_SUFIXO = "EDICAO EXTRA"
+DOWNLOAD_HEADLESS = os.getenv("DOWNLOAD_HEADLESS", "true").strip().lower() in _SIM
 DOWNLOAD_TZ = os.getenv("DOWNLOAD_TZ", "America/Sao_Paulo").strip()  # fuso da data da edição
 NAV_TIMEOUT_MS = int(os.getenv("NAV_TIMEOUT_MS", "60000"))          # timeout de navegação
 SCREENSHOT_DIR = _pasta("DOERJ_SCREENSHOT_DIR", "screenshots")      # prints de falha do download

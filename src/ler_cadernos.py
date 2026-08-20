@@ -49,6 +49,10 @@ def ler():
         res = download_diario.baixar_cadernos(
             estrategias=("leve",),
             pular=lambda nome, date: index_build.caderno_indexado(con, nome, date),
+            # A edição EXTRA sai na mesma página de seleção, como um link a mais.
+            # Não é todo dia que tem uma; nos dias em que não tem, isto não muda
+            # nada. Nos dias em que tem, é aqui que ela deixa de se perder.
+            incluir_extra=True,
         )
         date = res.get("edition_date")
         cadernos = res.get("cadernos", [])
@@ -63,6 +67,11 @@ def ler():
             n = index_build.index_caderno_bytes(con, c["nome"], date, c["bytes"], chave=c["chave"])
             print(f"[ok] {c['nome']} ({date}): +{n} paginas indexadas (PDF nao salvo)")
             total += n
+            if c.get("extra") and n:
+                # Linha berrante de propósito: é o evento raro que o pipeline
+                # perdia em silêncio até aqui. Quem lê o log tem de tropeçar nela.
+                print(f"[cadernos] *** EDICAO EXTRA detectada e indexada: '{c['nome']}' "
+                      f"({date}, {n} pagina(s)) | link no portal: '{c.get('texto_link','')}' ***")
         print(f"[done] {total} paginas de cadernos leves indexadas para {date}.")
     finally:
         con.close()

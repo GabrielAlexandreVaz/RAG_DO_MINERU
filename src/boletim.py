@@ -1,0 +1,744 @@
+"""
+============================================================================
+boletim.py · O boletim HTML no formato do e-mail "[DOERJ] Monitoramento SEFAZ"
+----------------------------------------------------------------------------
+Mesma extração do dia, outro formato de saída. O `monitor_estruturado.py` grava
+o Excel (uma aba por seção, para conferência) e a 002A; aqui os MESMOS itens
+saem no layout do e-mail que a área já recebe todo dia:
+
+  1. Prazos críticos          5. Observações executivas
+  2. Nomeações e exonerações  6. Expediente / ponto facultativo
+  3. Nomes monitorados        7. Varredura dos demais cadernos
+  4. Controle interno                 + tabela de prazos e rodapé
+
+Diferença para o `resumo_executivo.py`: aquele consolida séries homogêneas e
+mostra a rastreabilidade (item -> registros da 002A), para a validação da área;
+este é o boletim de LEITURA, item a item, no formato do e-mail.
+
+Duas fontes possíveis, mesmo resultado:
+  - chamado pelo monitor logo depois do Excel, com os itens em memória (não
+    depende do Oracle estar de pé);
+  - chamado pela linha de comando, lendo a 002A do Oracle (para refazer o
+    boletim de uma edição já processada, sem gastar IA).
+
+Todas as seções saem com a SEFAZ inteira. A seção 2 PODE ser recortada por
+subsecretaria (SUBSEC_BOLETIM / --subsecretaria), mas o padrão é não recortar.
+
+Uso:
+    python src/boletim.py                      # última edição gravada na 002A
+    python src/boletim.py --date 2026-08-17
+    python src/boletim.py --subsecretaria SUBCINT  # seção 2 só da SUBCINT
+============================================================================
+"""
+import argparse
+import html
+import re
+import sqlite3
+import sys
+from pathlib import Path
+
+import config
+import oracle_db
+# As funções auxiliares de casamento de nome e normalização já existem no monitor
+# (e são as MESMAS usadas na seção 3): importar evita duas implementações que um
+# dia divergem em silêncio.
+from monitor_estruturado import (_carregar_monitorados, _casa_nome, _dehifenizar,
+                                 _norm, _tokens_nome, mascarar_cpf)
+
+# Identidade visual: o mesmo azul do resumo executivo e do front-end.
+_AZUL = "#1F4E79"
+_CINZA = "#6E7E8B"
+
+DIAS_SEMANA = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira",
+               "Sexta-feira", "Sábado", "Domingo"]
+MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
+         "agosto", "setembro", "outubro", "novembro", "dezembro"]
+
+# Título de cada seção do boletim, na redação do e-mail.
+TITULOS = {
+    1: "1. PRAZOS CRÍTICOS (AÇÃO INTERNA SEFAZ)",
+    2: "2. NOMEAÇÕES E EXONERAÇÕES",
+    3: "3. NOMES MONITORADOS",
+    4: "4. CONTROLE INTERNO / AUDITORIA / OUVIDORIA / CORREGEDORIA — SEFAZ",
+    5: "5. OBSERVAÇÕES EXECUTIVAS",
+    6: "6. EXPEDIENTE / PONTO FACULTATIVO",
+    7: "7. VARREDURA DOS DEMAIS CADERNOS",
+}
+
+# Frase de seção vazia. Dizer "nenhum" por extenso é o que separa "não houve" de
+# "falhou" para quem lê — seção sem texto nenhum passa por erro do robô.
+VAZIO = {
+    1: "Nenhum prazo crítico para a SEFAZ nesta edição.",
+    2: "Nenhuma nomeação ou exoneração de cargo em comissão na SEFAZ nesta edição.",
+    4: "Nenhum ato de controle interno, auditoria, ouvidoria ou corregedoria da SEFAZ "
+       "nesta edição.",
+    5: "Nenhuma observação executiva nesta edição.",
+    6: "Nenhum ponto facultativo ou expediente especial publicado.",
+}
+
+# Os cadernos da seção 7, com o rótulo que aparece no boletim.
+CADERNOS_VARREDURA = [
+    ("Parte IB", "Parte IB (TCE-RJ)"),
+    ("Parte II", "Parte II (Poder Legislativo)"),
+    ("Parte IV", "Parte IV (Municipalidades)"),
+    ("Parte V", "Parte V (Publicações a Pedido)"),
+]
+
+# ============================================================================
+#  Recorte da seção 2 por subsecretaria
+# ============================================================================
+# A área pediu a seção 2 (movimentação de pessoal) só com o que é da SUBCINT. A
+# 002A continua gravando a SEFAZ inteira: o recorte é de LEITURA, não de coleta —
+# o que a IA não extrai não volta, o que o boletim não mostra volta com uma flag.
+#
+# A coluna ORGAO da 002A NÃO serve para isso: nas 163 movimentações de julho/agosto
+# ela vem quase sempre como "Secretaria de Estado de Fazenda" genérico, porque é
+# transcrição fiel do D.O. (ver a regra de FIDELIDADE no SYSTEM do monitor). O
+# recorte precisa de DOIS sinais, e os dois são indispensáveis - cada um pega um
+# caso que o outro perde:
+#
+#   A) PREFIXO DO PROCESSO SEI. O próprio DOERJ publicou a tabela de prefixos por
+#      unidade (edição de 04/08/2026, Parte I, p.4): "SEFAZ/SUBCINT SUBSECRETARIA
+#      DE CONTROLE INTERNO | SEI-040005". PROCESSO está preenchido em 158 das 163
+#      linhas. Sozinho, é o único sinal que pega a nomeação de REGINA CLAUDIA
+#      (SEI-040005/000674/2026, 04/08): o D.O. publicou o ato dizendo apenas "da
+#      Secretaria de Estado de Fazenda", sem a cadeia de lotação, então nenhum
+#      ajuste de prompt a recuperaria.
+#
+#   B) CADEIA DE LOTAÇÃO NO TEXTO. O D.O. costuma escrever a hierarquia inteira
+#      ("Corregedor Interno, da Corregedoria Interna, da Subsecretaria de Controle
+#      Interno, da Secretaria de Estado de Fazenda"). Sozinho, é o único sinal que
+#      pega a nomeação de AIRES FRANCISCO (30/07) como Ouvidor Geral da SUBCINT:
+#      o processo dele é SEI-040006 (Receita), de onde ele veio.
+#
+# A união dos dois devolve 5 acertos em 160 movimentações, sem falso positivo.
+SUBSECRETARIAS = {
+    "SUBCINT": {
+        "nome": "Subsecretaria de Controle Interno",
+        # Prefixo SEI da unidade (sinal A).
+        "prefixos": {"040005"},
+        # Unidades subordinadas que denunciam a lotação (sinal B). Termos ANCORADOS:
+        # um teste contra as 163 linhas mostrou que os genéricos arruinariam o
+        # recorte - "auditoria" casa "Auditor Fiscal da Receita Estadual" (~20 falsos
+        # positivos: é carreira, não unidade) e "corregedoria" solto casa "Corregedor
+        # Auxiliar" da CTCE. Por isso "corregedoria interna" entra como frase inteira
+        # e "auditoria" não entra de jeito nenhum. "ouvidoria" é seguro porque na
+        # SEFAZ a Ouvidoria é subordinada à SUBCINT (2 de 2 corretos).
+        "unidades": (
+            "subsecretaria de controle interno", "subcint",
+            "corregedoria interna", "ouvidoria",
+            "assessoria de integridade e riscos",
+            "assessoria especial de controle interno",
+        ),
+        # Vetam o item mesmo que um positivo tenha casado. A CTCE (Corregedoria
+        # Tributária de Controle Externo) é justamente quem RECEBE as denúncias da
+        # SUBCINT - são órgãos distintos. E a edição de 27/07 traz uma "Subsecretaria
+        # de Controle Interno - PGE", que é de outro órgão.
+        "negativos": ("corregedoria tributaria", "controle externo", "ctce",
+                      "controle interno - pge", "controle interno-pge"),
+    },
+}
+
+# Recorte padrão da seção 2 no boletim diário. None = SEFAZ inteira.
+#
+# Voltou para None em 20/08/2026, a pedido da área: a seção 2 tinha saído
+# recortada na SUBCINT, que é ~3% da movimentação de pessoal da SEFAZ, e o que se
+# quer ler é a movimentação da Secretaria inteira. A maquinaria do recorte
+# (SUBSECRETARIAS, _e_da_subsecretaria) continua aqui e testada — para voltar a
+# recortar, basta `--subsecretaria SUBCINT` na linha de comando ou repor a sigla
+# nesta constante.
+SUBSEC_BOLETIM = None
+
+# Faixas de urgência do rótulo da seção 1, contadas da edição até o prazo.
+# É rótulo de leitura, não de negócio: serve para o olho achar primeiro o que
+# vence esta semana. O que manda é a DATA, que vem logo ao lado.
+CURTO_PRAZO_DIAS = 3
+MEDIO_PRAZO_DIAS = 15
+
+# Corte do resumo no corpo do boletim (o texto completo está no Excel e na 002A).
+MAX_RESUMO = 420
+
+# Palavras por minuto para a estimativa de leitura do cabeçalho.
+PALAVRAS_POR_MINUTO = 200
+
+
+# ============================================================================
+#  Normalização dos itens (memória ou 002A -> um formato só)
+# ============================================================================
+def _txt(valor):
+    """Valor de campo como texto limpo. DATE do Oracle vira DD/MM/AAAA.
+
+    Passa por `mascarar_cpf`: todo campo do boletim entra por aqui, então este é o
+    ponto único onde o CPF que veio transcrito do D.O. sai mascarado — vale para os
+    itens em memória e para os relidos da 002A."""
+    if valor is None:
+        return ""
+    if hasattr(valor, "strftime"):
+        return valor.strftime("%d/%m/%Y")
+    return mascarar_cpf(" ".join(str(valor).split()))
+
+
+def de_002a(registros):
+    """Linhas da 002A (Oracle) -> itens no formato que o monitor tem em memória."""
+    mapa = {"categoria": "TIPO", "tipo_ato": "TIPO_ATO", "numero_ano": "NUMERO_ANO",
+            "orgao": "ORGAO", "pessoa": "PESSOA", "cargo": "CARGO",
+            "processo": "PROCESSO", "vigencia": "VIGENCIA", "resumo": "RESUMO",
+            "caderno": "CADERNO", "pagina": "PAGINA", "data_ato": "DATA_ATO",
+            "prazo": "PRAZO", "id_doerj": "ID_DOERJ"}
+    return [{chave: _txt(r.get(col)) for chave, col in mapa.items()} for r in registros]
+
+
+def _campo(item, chave):
+    """Campo do item como texto limpo (aceita item de memória ou da 002A)."""
+    return _txt(item.get(chave))
+
+
+def _corta(texto, n=MAX_RESUMO):
+    """Corta o texto no limite, sem partir palavra."""
+    t = " ".join((texto or "").split())
+    if len(t) <= n:
+        return t
+    corte = t.rfind(" ", 0, n)
+    return t[:corte if corte > 0 else n] + "..."
+
+
+# ============================================================================
+#  Cabeçalho da edição (número, governador, secretário) — lido do índice
+# ============================================================================
+# Nome próprio: palavras capitalizadas, com as preposições em minúscula no meio
+# ("Ricardo Couto de Castro"). Assim o casamento para no fim do nome e não
+# arrasta o resto da linha do expediente.
+_PALAVRA = r"(?:[A-ZÀ-Ý][a-zà-ÿ'’.-]+|d[aeo]s?|e)"
+_NOME = rf"[A-ZÀ-Ý][a-zà-ÿ'’.-]+(?:\s+{_PALAVRA}){{1,5}}"
+
+# O número da edição vem SEMPRE depois do ano romano, na tarja do IOERJ
+# ("ANO LII - Nº 147"). Casar só por "Nº \d+" pegaria o primeiro decreto da
+# página ("DECRETO Nº 50.426" virava edição nº 50).
+# O sufixo de letra é o que distingue a EDIÇÃO EXTRA: a extra de 07/08/2026 saiu
+# como "ANO LII - Nº 142-A", contra "Nº 142" da normal do mesmo dia. Sem capturar
+# o "-A", os dois boletins do dia sairiam com o mesmo número de edição no topo.
+_RX_NUMERO_EDICAO = re.compile(r"ANO\s+[IVXLCDM]+\s*[-–—]\s*N[ºo°]\s*(\d{1,4}(?:-[A-Z])?)\b",
+                               re.IGNORECASE)
+_RX_GOVERNADOR = re.compile(rf"GOVERNADOR(\s+EM\s+EXERC[ÍI]CIO)?\s+({_NOME})")
+_RX_SECRETARIO = re.compile(rf"SECRETARIA DE ESTADO DE FAZENDA\s+({_NOME})")
+
+# Só o alto da página 1 é expediente; mais abaixo já são os atos, onde
+# "GOVERNADOR DO ESTADO..." aparece no corpo dos decretos.
+_JANELA_EXPEDIENTE = 2500
+
+
+def _paginas_um(date, extra=None):
+    """[(caderno, texto da página 1)] da edição, em ordem de caderno.
+
+    `extra` separa as duas publicações do mesmo dia (None = ambas, False = só a
+    normal, True = só a extra). Sem isso, o boletim da edição extra leria o
+    cabeçalho da normal, que vem primeiro na ordem alfabética do caderno."""
+    if not config.DB_PATH.exists():
+        return []
+    filtro = {None: "", False: " AND caderno NOT LIKE ?", True: " AND caderno LIKE ?"}[extra]
+    args = (date,) if extra is None else (date, f"%{config.EXTRA_CADERNO_SUFIXO}%")
+    con = sqlite3.connect(config.DB_PATH)
+    try:
+        return con.execute(
+            f"SELECT caderno, content FROM pages WHERE date=? AND page=1{filtro} "
+            "ORDER BY caderno", args,
+        ).fetchall()
+    finally:
+        con.close()
+
+
+def cabecalho_edicao(date, extra=None):
+    """Número da edição, governador e secretário de Fazenda -> dict.
+
+    Tudo é OPCIONAL: se o MinerU não trouxe o cabeçalho daquele dia (acontece na
+    Parte I, cujo topo às vezes vem como imagem), a chave sai vazia e a linha do
+    boletim simplesmente não a menciona. Inventar número de edição seria pior."""
+    dados = {"numero": "", "governador": "", "governador_exercicio": False,
+             "secretario": ""}
+    for caderno, texto in _paginas_um(date, extra):
+        topo = (texto or "")[:_JANELA_EXPEDIENTE]
+        if not dados["numero"]:
+            m = _RX_NUMERO_EDICAO.search(topo)
+            if m:
+                dados["numero"] = m.group(1)
+        if not dados["governador"]:
+            m = _RX_GOVERNADOR.search(topo)
+            if m:
+                dados["governador"] = " ".join(m.group(2).split())
+                dados["governador_exercicio"] = bool(m.group(1))
+        if not dados["secretario"]:
+            m = _RX_SECRETARIO.search(topo)
+            if m:
+                dados["secretario"] = " ".join(m.group(1).split())
+    return dados
+
+
+def _cadernos_com_nome(date, nome):
+    """Cadernos da edição em que o nome aparece (varredura textual, sem IA).
+
+    Serve à linha do secretário de Fazenda na seção 7. Aqui NÃO se descarta a
+    menção do expediente (diferente da seção 3): a pergunta é "o nome consta
+    neste caderno?", e no expediente ele consta."""
+    toks = _tokens_nome(nome)
+    if len(toks) < 2 or not config.DB_PATH.exists():
+        return []
+    con = sqlite3.connect(config.DB_PATH)
+    try:
+        linhas = con.execute(
+            "SELECT caderno, content FROM pages WHERE date=? ORDER BY caderno, page", (date,)
+        ).fetchall()
+    finally:
+        con.close()
+    achados = []
+    for caderno, content in linhas:
+        curto = _caderno_curto(caderno)
+        if curto in achados:
+            continue
+        if (_casa_nome(_norm(content), toks) >= 0
+                or _casa_nome(_norm(_dehifenizar(content)), toks) >= 0):
+            achados.append(curto)
+    return achados
+
+
+# ============================================================================
+#  Datas e localização
+# ============================================================================
+def _data_br(date_iso):
+    """'2026-08-17' -> '17/08/2026'."""
+    try:
+        a, m, d = str(date_iso).split("-")
+        return f"{d}/{m}/{a}"
+    except ValueError:
+        return str(date_iso or "")
+
+
+def _data_extenso(date_iso):
+    """'2026-08-17' -> 'Segunda-feira, 17 de agosto de 2026' ('' se a data não presta)."""
+    import datetime as dt
+    try:
+        d = dt.date(*(int(x) for x in str(date_iso).split("-")))
+    except (ValueError, TypeError):
+        return ""
+    return f"{DIAS_SEMANA[d.weekday()]}, {d.day} de {MESES[d.month - 1]} de {d.year}"
+
+
+def _dias_ate(date_iso, prazo_br):
+    """Dias da edição até o prazo (DD/MM/AAAA). None se não der para calcular."""
+    import datetime as dt
+    try:
+        ed = dt.date(*(int(x) for x in str(date_iso).split("-")))
+        d, m, a = (int(x) for x in prazo_br.split("/"))
+        return (dt.date(a, m, d) - ed).days
+    except (ValueError, TypeError):
+        return None
+
+
+def _rotulo_prazo(date_iso, prazo_br):
+    """'Curto prazo' / 'Médio prazo' / 'Longo prazo' / 'Prazo a apurar'."""
+    if not prazo_br:
+        return "Prazo a apurar"
+    dias = _dias_ate(date_iso, prazo_br)
+    if dias is None:
+        return "Prazo a apurar"
+    if dias <= CURTO_PRAZO_DIAS:
+        return "Curto prazo"
+    return "Médio prazo" if dias <= MEDIO_PRAZO_DIAS else "Longo prazo"
+
+
+def _caderno_curto(caderno):
+    """'Parte I (Poder Executivo)' -> 'Parte I'."""
+    return _txt(caderno).split(" (")[0].strip()
+
+
+def _local(item):
+    """'(Parte I, p.1)' — de onde saiu o item."""
+    caderno = _caderno_curto(item.get("caderno"))
+    pagina = _campo(item, "pagina")
+    partes = [x for x in (caderno, f"p.{pagina}" if pagina else "") if x]
+    return f" ({', '.join(partes)})" if partes else ""
+
+
+# ============================================================================
+#  Redação dos itens
+# ============================================================================
+def _titulo(item):
+    """Título em caixa alta do ato ('PORTARIA SUPFINF Nº 1766 DE 13/08/2026')."""
+    tipo = _campo(item, "tipo_ato") or "Ato"
+    numero = _campo(item, "numero_ano")
+    data_ato = _campo(item, "data_ato")
+    titulo = " ".join(x for x in (tipo, numero) if x).upper()
+    # A data só entra se ainda não estiver no número/título (o D.O. costuma
+    # trazer "PORTARIA Nº 1.160 DE 13 DE AGOSTO DE 2026" inteiro no número).
+    if data_ato and data_ato not in titulo:
+        titulo += f" DE {data_ato}"
+    return titulo
+
+
+def _cauda(item):
+    """Processo + localização — o que fecha o parágrafo do item."""
+    processo = _campo(item, "processo")
+    return (f" — {processo}" if processo else "") + _local(item)
+
+
+def _item_padrao(item):
+    """Redação usada nas seções 4, 5, 6 e 7: TÍTULO — resumo — processo (caderno, p.)."""
+    return (f'<b>{_e(_titulo(item))}</b> — {_e(_corta(_campo(item, "resumo")))}'
+            f"{_e(_cauda(item))}")
+
+
+def _item_prazo(item, date):
+    """Redação da seção 1: rótulo de urgência, data, órgão e o que fazer."""
+    prazo = _campo(item, "prazo")
+    orgao = _campo(item, "orgao") or _campo(item, "tipo_ato")
+    cabeca = f'<b>{_e(_rotulo_prazo(date, prazo))}</b> — [{_e(prazo or _data_br(date))}]'
+    return (f'{cabeca} {_e(orgao)} — {_e(_corta(_campo(item, "resumo")))}'
+            f"{_e(_cauda(item))}")
+
+
+def _item_pessoal(item):
+    """Redação da seção 2: o ato e a pessoa em primeiro lugar."""
+    tipo = (_campo(item, "tipo_ato") or "Ato").upper()
+    pessoa = _campo(item, "pessoa")
+    cabeca = f"{tipo} — {pessoa}" if pessoa else tipo
+    detalhes = " ".join(x for x in (_campo(item, "cargo"), _campo(item, "orgao")) if x)
+    corpo = _corta(_campo(item, "resumo"))
+    return (f"<b>{_e(cabeca)}</b>" + (f" — {_e(detalhes)}" if detalhes else "")
+            + (f" — {_e(corpo)}" if corpo else "") + _e(_cauda(item)))
+
+
+def _item_nome(item):
+    """Redação da seção 3: quem, em que função, e o trecho publicado."""
+    pessoa = _campo(item, "pessoa")
+    cargo = _campo(item, "cargo")
+    quem = pessoa + (f" ({cargo})" if cargo else "")
+    return f'<b>{_e(quem)}</b> — {_e(_corta(_campo(item, "resumo")))}{_e(_local(item))}'
+
+
+# ============================================================================
+#  Montagem do HTML
+# ============================================================================
+def _e(s):
+    """Escapa o que veio do D.O. (o texto tem &, < e > de tabela do MinerU)."""
+    return html.escape(str(s or ""), quote=False)
+
+
+def _lista(linhas_html):
+    """<ul> com os itens já formatados (vazio -> string vazia)."""
+    if not linhas_html:
+        return ""
+    itens = "".join(f"<li>{linha}</li>" for linha in linhas_html)
+    return f"<ul>{itens}</ul>"
+
+
+def _vazio(secao):
+    return f'<p class="vazio">{_e(VAZIO[secao])}</p>'
+
+
+def _por_categoria(itens, *categorias):
+    """Itens de uma ou mais categorias, na ordem em que vieram."""
+    alvo = {c.upper() for c in categorias}
+    return [it for it in itens if _campo(it, "categoria").upper() in alvo]
+
+
+_RX_PREFIXO_SEI = re.compile(r"sei-(\d{6})")
+
+
+def _e_da_subsecretaria(item, sigla):
+    """True se o ato de pessoal é da subsecretaria `sigla` (ver SUBSECRETARIAS).
+
+    Basta UM dos dois sinais: o prefixo SEI do processo ou a cadeia de lotação no
+    texto. Nenhum dos dois cobre sozinho (ver o comentário de SUBSECRETARIAS), e
+    exigir os dois perderia tanto o Aires quanto a Regina Claudia."""
+    regra = SUBSECRETARIAS.get((sigla or "").strip().upper())
+    if not regra:
+        return True                      # sigla desconhecida: não esconde nada
+
+    prefixo = _RX_PREFIXO_SEI.search(_norm(_campo(item, "processo")))
+    if prefixo and prefixo.group(1) in regra["prefixos"]:
+        return True
+
+    texto = _norm(" ".join(_campo(item, k) for k in ("resumo", "cargo", "orgao")))
+    if any(x in texto for x in regra["negativos"]):
+        return False
+    return any(u in texto for u in regra["unidades"])
+
+
+def _ordena_prazos(itens, date):
+    """Prazos primeiro os que vencem antes; sem data, no fim."""
+    def chave(it):
+        dias = _dias_ate(date, _campo(it, "prazo"))
+        return (1, 0) if dias is None else (0, dias)
+    return sorted(itens, key=chave)
+
+
+def _redacao(item):
+    """Redação de um item na seção 7, conforme a natureza dele.
+
+    Nome monitorado mantém a redação da seção 3 (quem, função, trecho): "MENÇÃO
+    NO D.O." como título de ato não diz nada a quem lê."""
+    if _campo(item, "categoria").upper() == "NOMES_MONITORADOS":
+        return _item_nome(item)
+    return _item_padrao(item)
+
+
+def _secao_varredura(itens, date, secretario):
+    """Seção 7: uma linha por caderno + a conferência do secretário de Fazenda."""
+    linhas = []
+    for prefixo, rotulo in CADERNOS_VARREDURA:
+        do_caderno = [it for it in itens if _caderno_curto(it.get("caderno")) == prefixo]
+        if not do_caderno:
+            linhas.append(f"<b>{_e(rotulo)}:</b> Sem ocorrências SEFAZ/nomes monitorados.")
+            continue
+        sub = "".join(f"<li>{_redacao(it)}</li>" for it in do_caderno)
+        linhas.append(f"<b>{_e(rotulo)}:</b> {len(do_caderno)} ocorrência(s)."
+                      f"<ul>{sub}</ul>")
+    if secretario:
+        onde = _cadernos_com_nome(date, secretario)
+        situacao = ("Encontrado em " + ", ".join(onde) + "."
+                    if onde else "Não encontrado em nenhum caderno desta edição.")
+        linhas.append(f"<b>Secretário de Fazenda ({_e(secretario)}):</b> {_e(situacao)}")
+    return _lista(linhas)
+
+
+def _tabela_prazos(itens, date):
+    """A tabela de prazos que fecha o boletim (a mesma da seção 1, em quadro)."""
+    if not itens:
+        return ""
+    linhas = []
+    for it in _ordena_prazos(itens, date):
+        prazo = _campo(it, "prazo") or _data_br(date)
+        orgao = _campo(it, "orgao") or "SEFAZ"
+        local = _local(it).strip(" ()") or "-"
+        linhas.append(f"<tr><td>{_e(prazo)}</td><td>{_e(_corta(_campo(it, 'resumo'), 300))}</td>"
+                      f"<td>{_e(orgao)}</td><td>{_e(local)}</td></tr>")
+    return ("<h2>PRAZOS EM QUADRO</h2><table>"
+            "<tr><th>Prazo</th><th>Descrição</th><th>Órgão / Unidade</th>"
+            "<th>Caderno / Pág.</th></tr>" + "".join(linhas) + "</table>")
+
+
+_RX_TAG = re.compile(r"<[^>]+>")
+
+
+def _minutos_leitura(corpo_html):
+    """Estimativa de leitura em minutos (mínimo 1), a partir do texto sem tags."""
+    palavras = len(_RX_TAG.sub(" ", corpo_html).split())
+    return max(1, round(palavras / PALAVRAS_POR_MINUTO))
+
+
+def render(date, itens, n_monitorados=None, parcial=False, blocos_falha=0,
+           blocos_total=0, subsec=SUBSEC_BOLETIM, extra=False):
+    """Monta o HTML do boletim da edição. Devolve a página inteira, em texto.
+
+    `n_monitorados` é quantos nomes estavam VIGENTES na 002N naquela edição — o
+    denominador da seção 3 ("2 de 19 nomes"). Se não vier, é lido do banco.
+    `parcial` marca no topo que a rodada da IA teve bloco falhado: um boletim
+    incompleto que se anuncia completo é pior do que não ter boletim.
+    `subsec` recorta APENAS a seção 2 por subsecretaria (None = SEFAZ inteira).
+    `extra` marca que este é o boletim da EDIÇÃO EXTRA — um COMPLEMENTO ao do
+    dia, não um substituto."""
+    itens = list(itens or [])
+    if n_monitorados is None:
+        try:
+            monitorados, _origem = _carregar_monitorados(date)
+            n_monitorados = len(monitorados)
+        except Exception:  # noqa: BLE001 - o boletim não cai por causa do denominador
+            n_monitorados = 0
+
+    cab = cabecalho_edicao(date, extra=True if extra else None)
+    nomes = _por_categoria(itens, "NOMES_MONITORADOS")
+    prazos = _ordena_prazos(_por_categoria(itens, "PRAZO_CRITICO"), date)
+    # Seção 2: guarda o total SEFAZ antes de recortar, para poder dizer quantos
+    # atos ficaram fora. Sem esse número, uma seção 2 vazia não se distingue de
+    # uma edição sem movimentação nenhuma nem de uma rodada que falhou.
+    regra_subsec = SUBSECRETARIAS.get((subsec or "").strip().upper())
+    pessoal_sefaz = _por_categoria(itens, "MOVIMENTACAO_PESSOAL")
+    pessoal = ([it for it in pessoal_sefaz if _e_da_subsecretaria(it, subsec)]
+               if regra_subsec else pessoal_sefaz)
+    fora_do_recorte = len(pessoal_sefaz) - len(pessoal)
+    controle = _por_categoria(itens, "DESTAQUE_CONTROLE_INTERNO")
+    executivas = _por_categoria(itens, "OBSERVACAO_EXECUTIVA")
+    expediente = _por_categoria(itens, "EXPEDIENTE_PONTO_FACULTATIVO")
+    # A seção 7 é "o que saiu nos demais cadernos": tanto os itens que o monitor
+    # já classificou por caderno (6/7/8 do Excel) quanto qualquer outro item que
+    # tenha vindo de IB/II/IV/V — inclusive nome monitorado.
+    prefixos = {p for p, _r in CADERNOS_VARREDURA}
+    varredura = [it for it in itens if _caderno_curto(it.get("caderno")) in prefixos]
+
+    achados = sorted({_campo(it, "pessoa") for it in nomes if _campo(it, "pessoa")})
+    corpo = []
+
+    corpo.append(f"<h2>{_e(TITULOS[1])}</h2>")
+    corpo.append(_lista([_item_prazo(it, date) for it in prazos]) or _vazio(1))
+
+    titulo2 = TITULOS[2] + (f" — {subsec.upper()}" if regra_subsec else "")
+    corpo.append(f"<h2>{_e(titulo2)}</h2>")
+    if regra_subsec:
+        # O recorte tem de estar VISÍVEL no boletim: a SUBCINT é ~3% da movimentação
+        # de pessoal da SEFAZ, então na maioria dos dias esta seção sai vazia, e quem
+        # lê precisa saber que é recorte, não falha.
+        aviso_recorte = (f'Recorte: {regra_subsec["nome"]} ({subsec.upper()}).'
+                         + (f" {fora_do_recorte} ato(s) de pessoal da SEFAZ nesta "
+                            "edição ficaram fora deste recorte."
+                            if fora_do_recorte else ""))
+        corpo.append(f'<p class="contagem">{_e(aviso_recorte)}</p>')
+    vazio2 = (f'<p class="vazio">Nenhuma nomeação ou exoneração na '
+              f'{_e(subsec.upper())} nesta edição.</p>' if regra_subsec else _vazio(2))
+    corpo.append(_lista([_item_pessoal(it) for it in pessoal]) or vazio2)
+
+    corpo.append(f"<h2>{_e(TITULOS[3])} ({n_monitorados} nomes)</h2>")
+    corpo.append(f'<p class="contagem">{len(achados)} de {n_monitorados} '
+                 f"nome(s) encontrado(s) nesta edição"
+                 f'{" — " + _e("; ".join(achados)) if achados else ""}.</p>')
+    if nomes:
+        corpo.append(_lista([_item_nome(it) for it in nomes]))
+
+    corpo.append(f"<h2>{_e(TITULOS[4])}</h2>")
+    corpo.append(_lista([_item_padrao(it) for it in controle]) or _vazio(4))
+
+    corpo.append(f"<h2>{_e(TITULOS[5])}</h2>")
+    corpo.append(_lista([_item_padrao(it) for it in executivas]) or _vazio(5))
+
+    corpo.append(f"<h2>{_e(TITULOS[6])}</h2>")
+    corpo.append(_lista([_item_padrao(it) for it in expediente]) or _vazio(6))
+
+    corpo.append(f"<h2>{_e(TITULOS[7])}</h2>")
+    corpo.append(_secao_varredura(varredura, date, cab["secretario"]))
+    corpo.append(_tabela_prazos(prazos, date))
+    corpo_html = "\n".join(corpo)
+
+    # Linha de identificação da edição, como no e-mail.
+    identificacao = [x for x in (
+        f"Edição Nº {cab['numero']}" if cab["numero"] else "",
+        _data_extenso(date) or _data_br(date),
+        (f"Governador{' em Exercício' if cab['governador_exercicio'] else ''}: "
+         f"{cab['governador']}") if cab["governador"] else "",
+        f"Secretário de Fazenda: {cab['secretario']}" if cab["secretario"] else "",
+    ) if x]
+
+    aviso = ""
+    # A tarja da edição extra vem PRIMEIRO e é obrigatória: a extra costuma ter
+    # poucas páginas, então quase todas as seções saem com "Nenhum ... nesta
+    # edição". Sem dizer que é complemento, este boletim se parece com um boletim
+    # diário que falhou.
+    if extra:
+        aviso += ('<p class="extra">EDIÇÃO EXTRA — este boletim cobre APENAS o caderno '
+                  f"extra publicado em {_e(_data_br(date))}. O boletim da edição normal "
+                  "do dia foi enviado à parte; as seções vazias aqui significam que o "
+                  "caderno extra não trouxe nada daquele tipo.</p>")
+    if parcial:
+        aviso += ('<p class="parcial">BOLETIM PARCIAL — '
+                  f"{blocos_falha} de {blocos_total} blocos falharam na leitura por IA. "
+                  "Seções podem estar incompletas; regenere quando a IA normalizar.</p>")
+
+    titulo = ("[DOERJ] Monitoramento SEFAZ" + (" - EDICAO EXTRA" if extra else "")
+              + f" - {_data_br(date)}")
+    return f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{_e(titulo)}</title>
+<style>
+ body{{font-family:Segoe UI,Calibri,Arial,sans-serif;color:#2b2b2b;max-width:900px;
+      margin:0 auto;padding:24px;line-height:1.55}}
+ h1{{font-size:21px;color:{_AZUL};margin:0 0 4px}}
+ .sub{{color:{_CINZA};font-size:13.5px;margin:0 0 22px}}
+ h2{{font-size:15px;color:{_AZUL};margin:26px 0 10px;padding-bottom:5px;
+     border-bottom:2px solid {_AZUL}}}
+ ul{{margin:0;padding-left:20px}} li{{margin-bottom:10px;font-size:14px}}
+ ul ul{{margin-top:8px}}
+ .vazio{{font-style:italic;color:{_CINZA};font-size:14px;margin:0}}
+ .contagem{{font-style:italic;color:{_CINZA};font-size:14px;margin:0 0 10px}}
+ .parcial{{background:#fdecea;border-left:4px solid #b00020;color:#b00020;
+          font-weight:bold;font-size:13.5px;padding:9px 12px;margin:0 0 18px}}
+ .extra{{background:#fff4e0;border-left:4px solid #b06a00;color:#7a4a00;
+        font-weight:bold;font-size:13.5px;padding:9px 12px;margin:0 0 18px}}
+ table{{border-collapse:collapse;margin-top:8px;font-size:13px;width:100%}}
+ td,th{{border:1px solid #DCE3EA;padding:6px 10px;text-align:left;vertical-align:top}}
+ th{{background:#F0F5F9;color:#41525F}}
+ .rodape{{margin-top:28px;color:{_CINZA};font-size:12px;border-top:1px solid #DCE3EA;
+         padding-top:12px}}
+</style></head><body>
+<h1>[DOERJ] Monitoramento SEFAZ-RJ{" — EDIÇÃO EXTRA" if extra else ""}</h1>
+<div class="sub">{_e(" | ".join(identificacao))} · leitura ~{_minutos_leitura(corpo_html)} min</div>
+{aviso}
+{corpo_html}
+<div class="rodape">Ajude a aprimorar este Boletim. O Diário Oficial é um documento variável;
+contamos com múltiplas percepções para melhorar continuamente a capacidade de síntese e a
+sensibilidade entre o que é publicado e o que é relevante para o nosso trabalho setorial. Caso
+note uma omissão, um falso positivo ou algo que possa ser melhor classificado, responda a este
+e-mail com sua sugestão.<br><br>
+Gerado automaticamente a partir da leitura do DOERJ (MinerU + IA) — {len(itens)} item(ns)
+estruturado(s) na edição de {_e(_data_br(date))}.</div>
+</body></html>"""
+
+
+def gerar(date=None, itens=None, destino=None, n_monitorados=None, parcial=False,
+          blocos_falha=0, blocos_total=0, subsec=SUBSEC_BOLETIM, extra=False):
+    """Escreve `relatorios/boletim_<data>.html` e devolve o caminho.
+
+    Sem `itens`, lê a edição na 002A do Oracle (é o caminho da linha de comando).
+    Rodada parcial sai como `boletim_<data>_PARCIAL.html`, pela mesma razão do
+    Excel: não sobrescrever um boletim completo por um pela metade.
+    `subsec` recorta a seção 2 (None = SEFAZ inteira).
+    `extra` gera o boletim da EDIÇÃO EXTRA (`boletim_<data>_EXTRA.html`), que é um
+    arquivo à parte — o da edição normal do dia continua intacto."""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+    if not date:
+        from search import list_dates
+        datas = list_dates()
+        if not datas:
+            sys.exit("[ERRO] nenhuma edicao no indice.")
+        date = datas[0]
+
+    if itens is None:
+        if not oracle_db.configurado() or not config.oracle_settings().get("table_monitor"):
+            sys.exit("[ERRO] Oracle/002A nao configurado no .env - sem itens para o boletim.")
+        registros = oracle_db.listar_monitoramento(date, extra=extra)
+        if not registros:
+            sys.exit(f"[ERRO] a 002A nao tem registro da edicao {date}"
+                     f"{' (EDICAO EXTRA)' if extra else ''}. "
+                     "Rode antes: python src/monitor_estruturado.py")
+        print(f"[boletim] {len(registros)} registro(s) lidos da 002A para a edicao {date}"
+              f"{' (EDICAO EXTRA)' if extra else ''}")
+        itens = de_002a(registros)
+
+    destino = Path(destino) if destino else config.RELATORIOS_DIR
+    destino.mkdir(parents=True, exist_ok=True)
+    arquivo = (destino /
+               f"boletim_{date}{'_EXTRA' if extra else ''}{'_PARCIAL' if parcial else ''}.html")
+    arquivo.write_text(
+        render(date, itens, n_monitorados=n_monitorados, parcial=parcial,
+               blocos_falha=blocos_falha, blocos_total=blocos_total, subsec=subsec,
+               extra=extra),
+        encoding="utf-8")
+    print(f"[ok] {arquivo}")
+    return arquivo
+
+
+def main():
+    """Linha de comando: refaz o boletim de uma edição a partir da 002A."""
+    ap = argparse.ArgumentParser(
+        description="Gera o boletim HTML (formato do e-mail) de uma edicao do DOERJ.")
+    ap.add_argument("--date", default=None, help="Edicao AAAA-MM-DD (padrao: a mais recente)")
+    ap.add_argument("--dir", default=None, help="Pasta de destino (padrao: <projeto>/relatorios)")
+    ap.add_argument("--extra", action="store_true",
+                    help="Boletim da EDICAO EXTRA do dia (boletim_<data>_EXTRA.html)")
+    ap.add_argument("--subsecretaria", default=SUBSEC_BOLETIM,
+                    help="Recorta a secao 2 por subsecretaria (padrao: "
+                         f"{SUBSEC_BOLETIM or 'TODAS, a SEFAZ inteira'}). "
+                         f"Siglas: {', '.join(SUBSECRETARIAS)}")
+    args = ap.parse_args()
+    subsec = args.subsecretaria
+    if (subsec or "").strip().upper() in ("TODAS", "TODOS", "SEFAZ", "NENHUMA", ""):
+        subsec = None
+    elif subsec.strip().upper() not in SUBSECRETARIAS:
+        sys.exit(f"[ERRO] subsecretaria '{subsec}' desconhecida. "
+                 f"Use TODAS ou uma de: {', '.join(SUBSECRETARIAS)}")
+    gerar(date=args.date, destino=args.dir, subsec=subsec, extra=args.extra)
+
+
+if __name__ == "__main__":
+    main()
+

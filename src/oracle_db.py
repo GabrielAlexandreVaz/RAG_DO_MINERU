@@ -342,33 +342,87 @@ def ja_gravado_monitor(edicao_iso):
         con.close()
 
 
-def listar_monitoramento(edicao_iso):
+def listar_monitoramento(edicao_iso, extra=None):
     """Lê de volta as linhas da 002A de UMA edição -> [{coluna: valor}], ordenadas.
 
     Existe para o resumo executivo nascer do BANCO, e não do Excel local: a área
-    demandante valida a 002A, então é ela a fonte da verdade. ID vem no SELECT, mas
-    hoje é sempre nulo (ver salvar_monitoramento): a rastreabilidade do resumo é
-    feita por PESSOA + PROCESSO + PAGINA."""
+    demandante valida a 002A, então é ela a fonte da verdade.
+
+    `extra` separa as duas publicações que dividem a mesma DATA_EDICAO (ver
+    _faixa_id): None = tudo, False = só a edição normal, True = só a extra."""
     cols = ["ID", "ID_DOERJ", "TIPO", "TIPO_ATO", "NUMERO_ANO", "ORGAO", "PESSOA", "CARGO",
             "PROCESSO", "VIGENCIA", "RESUMO", "CADERNO", "PAGINA", "DATA_EDICAO",
             "DATA_ATO", "PRAZO"]
+    edicao_date = _to_date(edicao_iso)
+    args = {"ed": edicao_date}
+    filtro = ""
+    if extra is not None:
+        ini, fim = _faixa_id(edicao_date, extra)
+        args.update({"ini": ini, "fim": fim, "cad": f"%{_CADERNO_EXTRA}%"})
+        # DOIS sinais, e são complementares. A FAIXA DE ID classifica tudo que este
+        # código grava. O CADERNO alcança as linhas gravadas ANTES da separação
+        # existir: em 07/08/2026 a edição extra foi indexada à mão e o monitor,
+        # que então varria a data inteira, gravou o ato dela na faixa normal.
+        # Sem o segundo sinal, aquele ato apareceria no boletim da edição normal.
+        # (No DELETE de salvar_monitoramento vale só o ID: a coluna CADERNO vem
+        # item a item e às vezes chega vazia — uma linha assim não seria alcançada
+        # por DELETE nenhum e sobreviveria para sempre.)
+        filtro = (" AND (ID BETWEEN :ini AND :fim OR UPPER(CADERNO) LIKE :cad)" if extra else
+                  " AND (ID IS NULL OR ID BETWEEN :ini AND :fim)"
+                  " AND (CADERNO IS NULL OR UPPER(CADERNO) NOT LIKE :cad)")
     con = get_connection()
     try:
         cur = con.cursor()
         cur.execute(
             f"SELECT {', '.join(cols)} FROM {_tabela_monitor()} "
-            "WHERE DATA_EDICAO = :ed ORDER BY TIPO, PAGINA, ID",
-            {"ed": _to_date(edicao_iso)},
+            f"WHERE DATA_EDICAO = :ed{filtro} ORDER BY TIPO, PAGINA, ID", args,
         )
         return [dict(zip(cols, linha)) for linha in cur.fetchall()]
     finally:
         con.close()
 
 
-def salvar_monitoramento(edicao_iso, itens, categoria_secao=None):
-    """Grava os itens do monitor na tabela ÚNICA 002A. Idempotente por DATA_EDICAO
-    (DELETE da edição + INSERT). `TIPO` recebe a categoria técnica do item.
-    Devolve o nº de linhas inseridas. (`categoria_secao` mantido só por compat.)"""
+# Onde a faixa de ID da edição EXTRA começa, dentro dos 10.000 reservados por dia.
+# A edição normal fica em base+1..base+4999 e a extra em base+5000..base+9999.
+# Por que partir a faixa, em vez de apagar por CADERNO: a coluna CADERNO é
+# preenchida item a item (vem da IA ou da varredura) e às vezes chega vazia — uma
+# linha assim não seria alcançada por nenhum dos dois DELETEs e sobreviveria para
+# sempre. O ID é chave NOSSA, determinística, e ainda deixa a origem legível:
+# MOD(ID,10000) >= 5000 veio de edição extra.
+# Compatível com o histórico: o maior dia até aqui teve 76 itens, todos em
+# base+1..base+76 — nada a migrar.
+_ID_EXTRA_INICIO = 5000
+_ID_POR_EDICAO = 10000
+# Marca do caderno de edição extra na coluna CADERNO (ver config.EXTRA_CADERNO_SUFIXO;
+# em MAIÚSCULAS porque a comparação no Oracle é feita sobre UPPER(CADERNO)).
+_CADERNO_EXTRA = "EDICAO EXTRA"
+
+
+def _faixa_id(edicao_date, extra=False):
+    """(primeiro, último) ID reservado para esta publicação naquela data."""
+    base = int(edicao_date.strftime("%Y%m%d")) * _ID_POR_EDICAO
+    if extra:
+        return base + _ID_EXTRA_INICIO, base + _ID_POR_EDICAO - 1
+    return base + 1, base + _ID_EXTRA_INICIO - 1
+
+
+def e_da_edicao_extra(id_linha):
+    """True se a linha da 002A veio da EDIÇÃO EXTRA (pela faixa do ID)."""
+    try:
+        return int(id_linha) % _ID_POR_EDICAO >= _ID_EXTRA_INICIO
+    except (TypeError, ValueError):
+        return False
+
+
+def salvar_monitoramento(edicao_iso, itens, categoria_secao=None, extra=False):
+    """Grava os itens do monitor na tabela ÚNICA 002A. Idempotente por edição.
+    `TIPO` recebe a categoria técnica do item. Devolve o nº de linhas inseridas.
+    (`categoria_secao` mantido só por compat.)
+
+    `extra=True` grava a EDIÇÃO EXTRA do mesmo dia. As duas publicações convivem
+    na mesma DATA_EDICAO, então a faixa de ID é PARTIDA (ver _faixa_id) e o DELETE
+    apaga só a faixa correspondente. Apagar por DATA_EDICAO, como era, faria a
+    rodada da extra levar junto as linhas da edição normal do dia."""
     alvo = _tabela_monitor()
     edicao_date = _to_date(edicao_iso)
     # ID: chave NOSSA, para localizar a linha (a tabela nao tem sequence nem
@@ -378,12 +432,12 @@ def salvar_monitoramento(edicao_iso, itens, categoria_secao=None):
     # Nao confundir com o Id do proprio DOERJ (o "Id: NNNNNNN" no fim de cada
     # materia): esse identifica a MATERIA publicada, se repete quando uma materia
     # vira varios registros nossos, e por isso vai em coluna propria.
-    base_id = int(edicao_date.strftime("%Y%m%d")) * 10000
-    if len(itens) > 9999:                        # nunca chegou perto (76 no maior dia)
+    ini_id, fim_id = _faixa_id(edicao_date, extra)
+    if len(itens) > (fim_id - ini_id + 1):       # nunca chegou perto (76 no maior dia)
         raise ValueError(f"{len(itens)} itens numa edicao estoura a faixa de ID reservada")
     linhas = [
         {
-            "id": base_id + i,
+            "id": ini_id + i - 1,
             "id_doerj": _so_numero(it.get("id_doerj")),
             "tipo": _trunc((it.get("categoria") or "").strip().upper(), _LIM_002["TIPO"]),
             "tipo_ato": _trunc(it.get("tipo_ato"), _LIM_002["TIPO_ATO"]),
@@ -406,7 +460,10 @@ def salvar_monitoramento(edicao_iso, itens, categoria_secao=None):
     con = get_connection()
     try:
         cur = con.cursor()
-        cur.execute(f"DELETE FROM {alvo} WHERE DATA_EDICAO = :ed", {"ed": edicao_date})
+        # DELETE só da FAIXA desta publicação: a edição normal e a extra do mesmo
+        # dia dividem a DATA_EDICAO, e apagar por data levaria a outra junto.
+        cur.execute(f"DELETE FROM {alvo} WHERE DATA_EDICAO = :ed AND ID BETWEEN :ini AND :fim",
+                    {"ed": edicao_date, "ini": ini_id, "fim": fim_id})
         if linhas:
             cur.executemany(
                 f"INSERT INTO {alvo} (ID, ID_DOERJ, TIPO, TIPO_ATO, NUMERO_ANO, ORGAO, PESSOA, "

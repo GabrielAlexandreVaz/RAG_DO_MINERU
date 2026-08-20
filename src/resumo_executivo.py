@@ -36,7 +36,7 @@ from pathlib import Path
 
 import config
 import oracle_db
-from monitor_estruturado import CATEGORIA_SECAO, SECOES
+from monitor_estruturado import CATEGORIA_SECAO, SECOES, mascarar_cpf
 
 # Frase de seção vazia, no tom do e-mail da área ("varredura integral realizada").
 VAZIO = {
@@ -70,8 +70,11 @@ def _data_br(valor):
 
 
 def _txt(item, chave):
-    """Valor de uma coluna da 002A como texto limpo."""
-    return " ".join(str(item.get(chave) or "").split())
+    """Valor de uma coluna da 002A como texto limpo, com o CPF mascarado.
+
+    Ponto único de leitura das colunas: o CPF que o D.O. publica por extenso não
+    sai no HTML nem no TXT (ver monitor_estruturado.mascarar_cpf)."""
+    return mascarar_cpf(" ".join(str(item.get(chave) or "").split()))
 
 
 _RE_NUMERO = re.compile(r"^(.*?)(\d[\d.]*)\s*/?\s*(\d{4})?$")

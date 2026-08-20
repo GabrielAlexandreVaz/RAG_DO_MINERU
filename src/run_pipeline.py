@@ -16,6 +16,16 @@ Etapas:
   5) Monitor 8 temas -> Excel + boletim HTML + Oracle 002A -> monitor_estruturado.py.
      O boletim (relatorios/boletim_<data>.html) e a MESMA extracao no formato do
      e-mail de monitoramento; sai junto com o Excel, sem chamada extra de IA.
+  6) EDICAO EXTRA -> monitor_estruturado.py --extra. As vezes o IOERJ publica uma
+     segunda edicao no mesmo dia; ela aparece como um caderno A MAIS na pagina de
+     selecao e o passo 3 ja a indexa. Aqui ela e lida SOZINHA (o diario do dia nao
+     e relido), com saida *_EXTRA propria. Nos dias sem edicao extra - a maioria -
+     este passo sai na hora, sem chamar a IA.
+  7) Boletins por e-mail -> enviar_email.py (o do dia e, se houver, o da extra).
+     Manda o HTML no CORPO da mensagem pela API corporativa de e-mail (um POST
+     por destinatario), 1x por edicao (marcador em relatorios\) e so se a rodada
+     foi COMPLETA. Tambem NAO derruba o pipeline. Enquanto EMAIL_ENVIO_ATIVO=false,
+     grava relatorios\email_<data>.json em vez de chamar a API.
   +) Limpeza (retenção de disco) -> limpar.py. Também não derruba o pipeline.
 
 O Excel diário das exonerações saiu do pipeline: as exonerações já vão para a
@@ -57,10 +67,10 @@ def _run(desc, cmd):
 
 
 def main():
-    """Roda as 5 etapas em sequência, cada uma num subprocesso próprio.
+    """Roda as 7 etapas em sequência, cada uma num subprocesso próprio.
 
     Subprocesso em vez de import para isolar falhas: cada etapa tem seu código de
-    saída, e um travamento do MinerU não leva junto o restante. Download e
+    saída, e um travamento do MinerU não leva junto o restante. Download, e-mail e
     limpeza são as exceções que NÃO derrubam o pipeline — as demais param no
     primeiro erro, porque cada uma depende da anterior."""
     try:
@@ -89,30 +99,50 @@ def main():
     #    execucao anterior (o job roda de hora em hora) e faltar so a gravacao no
     #    Oracle. Se nao houver nada para ler, o passo 1 falha com mensagem propria.
     if args.download:
-        print("\n===== 1/5 Download do D.O. (Playwright) =====", flush=True)
+        print("\n===== 1/7 Download do D.O. (Playwright) =====", flush=True)
         if subprocess.run([str(rag_py), str(src / "download_diario.py")]).returncode != 0:
             print("[ATENCAO] o download falhou; seguindo com o que ja estiver baixado.",
                   flush=True)
 
     # 1) MinerU + indice da Parte I (edicao mais recente). Idempotente e barato.
-    _run("2/5 MinerU + indice Parte I (index_build --latest)",
+    _run("2/7 MinerU + indice Parte I (index_build --latest)",
          [rag_py, src / "index_build.py", "--latest"])
 
     # 2) Cadernos leves (IB/II/IV/V): le em memoria e indexa (sem salvar PDF).
     #    So roda se o Playwright estiver instalado; senao, avisa e segue.
     if args.skip_cadernos:
-        print("[skip] passo 3/5 (cadernos leves) pulado por --skip-cadernos.", flush=True)
+        print("[skip] passo 3/7 (cadernos leves) pulado por --skip-cadernos.", flush=True)
     else:
-        _run("3/5 Cadernos leves IB/II/IV/V (ler_cadernos)", [rag_py, src / "ler_cadernos.py"])
+        _run("3/7 Cadernos leves IB/II/IV/V (ler_cadernos)", [rag_py, src / "ler_cadernos.py"])
 
     # 3) Atos de pessoal -> Oracle (tabela 001A).
-    _run("4/5 Atos de pessoal -> Oracle (001A)",
+    _run("4/7 Atos de pessoal -> Oracle (001A)",
          [rag_py, src / "atos_pessoal.py", "--tema", args.tema] + forca)
 
     # 4) Monitor estruturado (8 temas) -> Excel + boletim HTML + Oracle (002A). Usa o MONITOR_MODEL
     #    (Haiku, mais barato). Idempotente: pula se o Excel canonico do dia ja existe.
-    _run("5/5 Monitor 8 temas -> Excel + boletim HTML + Oracle (002A)",
+    _run("5/7 Monitor 8 temas -> Excel + boletim HTML + Oracle (002A)",
          [rag_py, src / "monitor_estruturado.py"] + forca)
+
+    # 5) EDICAO EXTRA. Nem todo dia tem uma; nos dias normais este passo sai em
+    #    menos de um segundo, ANTES de qualquer chamada de IA (nao ha caderno de
+    #    edicao extra indexado na data). Quando tem, le SO o caderno novo — o
+    #    diario do dia nao e relido — e gera o *_EXTRA proprio.
+    _run("6/7 Edicao extra (le so o caderno novo, se houver)",
+         [rag_py, src / "monitor_estruturado.py", "--extra"] + forca)
+
+    # 6) Boletins por e-mail (o do dia e, se houver, o da edicao extra). NAO usa
+    #    _run, pela mesma razao do download e da limpeza: uma falha da API de
+    #    e-mail nao pode marcar como fracassada uma execucao que ja gravou tudo
+    #    no Oracle.
+    #    Cada envio tem trava propria (so rodada COMPLETA, so uma vez por edicao),
+    #    entao rodar de hora em hora nao gera e-mail repetido.
+    print("\n===== 7/7 Boletins por e-mail =====", flush=True)
+    for rotulo, extra in (("edicao do dia", []), ("edicao extra", ["--extra"])):
+        if subprocess.run([str(rag_py), str(src / "enviar_email.py")]
+                          + extra + forca).returncode != 0:
+            print(f"[ATENCAO] o envio do boletim ({rotulo}) falhou; o pipeline em si "
+                  "terminou bem.", flush=True)
 
     # 6) Retencao de disco. NAO usa _run: falha de limpeza nao pode marcar como
     #    fracassada uma execucao que ja gravou tudo no Oracle.

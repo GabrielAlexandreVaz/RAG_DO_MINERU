@@ -29,6 +29,7 @@ import base64
 import re
 import sys
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -60,6 +61,13 @@ def _hoje_iso():
 def pdf_name(edition_date):
     """DOERJ_AAAA-MM-DD.pdf para uma data de edição YYYY-MM-DD."""
     return f"DOERJ_{edition_date}.pdf"
+
+
+def _sem_acento(s):
+    """'EDIÇÃO' -> 'EDICAO'. O rótulo do caderno extra sai do texto do portal, que
+    vem acentuado; no índice ele está gravado sem acento desde 07/08/2026."""
+    return "".join(c for c in unicodedata.normalize("NFKD", s or "")
+                   if not unicodedata.combining(c))
 
 
 def edition_date_from_data_param(data_b64):
@@ -402,14 +410,103 @@ def _coletar_links_cadernos(page, alvos):
     return out
 
 
-def baixar_cadernos(estrategias=("leve",), pular=None):
+def _rotulos_dos_links(page):
+    """[(rótulo, href)] de cada link de caderno da página de seleção.
+
+    O RÓTULO é o texto do elemento que CONTÉM o link, não o do link. Foi o que a
+    página de 07/08/2026 mostrou: nos dias com edição extra o portal repete um
+    link "Parte I (Poder Executivo)" idêntico ao normal, e a distinção — o
+    "EDIÇÃO EXTRA" — fica na célula ao redor. Casar pelo texto da âncora deixaria
+    as duas Partes I indistinguíveis."""
+    saida = []
+    anchors = page.locator("a[href*='mostra_edicao']")
+    for i in range(anchors.count()):
+        a = anchors.nth(i)
+        try:
+            texto = " ".join((a.inner_text() or "").split())
+            href = a.get_attribute("href") or ""
+            volta = a.evaluate(
+                "e => { const p = e.closest('td,li,p,div,tr'); return p ? p.innerText : ''; }")
+        except Exception:  # noqa: BLE001 - um link ilegível não pode parar a varredura
+            continue
+        rotulo = " ".join((volta or "").split()) or texto
+        # Só aceita o texto do pai se ele CONTIVER o do link (se o pai for um
+        # bloco grande com vários links, o texto dele não descreve este link).
+        if texto and texto not in rotulo:
+            rotulo = texto
+        if rotulo and href:
+            saida.append((rotulo, href))
+    return saida
+
+
+def _cadernos_extra(page, conhecidos=None):
+    """Links da página de seleção que são de EDIÇÃO EXTRA -> pseudo-cadernos.
+
+    A edição extra aparece como um link A MAIS na mesma página (ver o comentário
+    de config.EXTRA_MATCH). Devolve entradas no mesmo formato de config.CADERNOS,
+    para seguirem pelo MESMO caminho dos cadernos leves — inclusive a trava de
+    idempotência, que passa a valer por (rótulo do extra, data) sem alteração.
+
+    O rótulo herda o texto do PORTAL: "Parte I (Poder Executivo) EDIÇÃO EXTRA"
+    vira "Parte I (Poder Executivo) EDICAO EXTRA" — exatamente o que já está
+    gravado no índice para 07/08/2026.
+
+    LOGA o rótulo de TODOS os links, reconhecidos ou não: é assim que uma redação
+    nova do portal aparece no log, em vez de se perder."""
+    links = _rotulos_dos_links(page)
+    _log("links da pagina de selecao: " + " | ".join(r for r, _h in links))
+    if not config.EXTRA_ATIVO:
+        return []
+
+    conhecidos = conhecidos if conhecidos is not None else config.CADERNOS
+    rx_extra = re.compile(config.EXTRA_MATCH, re.IGNORECASE)
+    reclamados, extras = set(), []
+    for rotulo, href in links:
+        if rx_extra.search(rotulo):
+            extras.append((rotulo, href))
+            continue
+        # Cada caderno conhecido reclama UM link (o primeiro que casar): a página
+        # repete rótulos, e sem isso o segundo "Poder Executivo" viraria o normal.
+        for c in conhecidos:
+            if c["chave"] not in reclamados and re.search(re.escape(c["match"]), rotulo,
+                                                          re.IGNORECASE):
+                reclamados.add(c["chave"])
+                break
+        else:
+            _log(f"link nao reconhecido na pagina de selecao: '{rotulo}' "
+                 "(nao casa caderno conhecido nem o padrao de edicao extra) -> "
+                 "se for edicao extra, ajuste DOERJ_EXTRA_MATCH no .env")
+
+    saida = []
+    for n, (rotulo, href) in enumerate(extras, start=1):
+        chave = "extra" if n == 1 else f"extra_{n}"
+        # Rótulo do índice: o texto do portal sem acento, com o sufixo canônico no
+        # lugar da redação que veio ("EDIÇÃO EXTRA", "Edicao Extra", ...).
+        base = re.sub(config.EXTRA_MATCH, "", _sem_acento(rotulo),
+                      flags=re.IGNORECASE).strip(" -–—")
+        nome = f"{base or config.CADERNO_PARTE_I} {config.EXTRA_CADERNO_SUFIXO}"
+        if n > 1:
+            nome += f" {n}"
+        saida.append({"chave": chave, "nome": " ".join(nome.split()), "match": rotulo,
+                      "ativo": True, "estrategia": "leve", "extra": True,
+                      "texto_link": rotulo, "url": urljoin(page.url, href)})
+        _log(f"*** EDICAO EXTRA no portal: '{rotulo}' -> caderno '{saida[-1]['nome']}' ***")
+    return saida
+
+
+def baixar_cadernos(estrategias=("leve",), pular=None, incluir_extra=False):
     """Baixa em MEMÓRIA os cadernos de config.CADERNOS cuja 'estrategia' esteja em
     `estrategias`. NÃO salva nada em disco. Uma sessão do navegador para todos.
 
     `pular(nome, edition_date) -> bool`: se devolver True, o caderno NÃO é baixado
     (ex.: já está indexado) — evita rebaixar toda hora no job agendado.
 
-    Devolve {"edition_date": "AAAA-MM-DD", "cadernos": [{...caderno, "bytes": b|None}]}."""
+    `incluir_extra=True` acrescenta os cadernos de EDIÇÃO EXTRA que estiverem na
+    página de seleção naquele dia (ver `_cadernos_extra`). Na maioria dos dias não
+    há nenhum e nada muda; nos dias em que há, custa um `goto` a mais.
+
+    Devolve {"edition_date": "AAAA-MM-DD", "cadernos": [{...caderno, "bytes": b|None}]};
+    os cadernos de edição extra vêm com "extra": True."""
     from playwright.sync_api import (
         TimeoutError as PlaywrightTimeoutError,
         sync_playwright,
@@ -449,16 +546,26 @@ def baixar_cadernos(estrategias=("leve",), pular=None):
         try:
             _goto_cadernos(page)
             edition_date = _parse_edition_date_from_url(page.url) or _hoje_iso()
+            # Edição EXTRA: entra na MESMA lista dos cadernos leves, então herda a
+            # trava de idempotência, o download em memória e a indexação sem custo
+            # de uma segunda sessão de navegador. Na maioria dos dias não há
+            # nenhuma, e isto devolve lista vazia.
+            candidatos = list(alvos)
+            if incluir_extra:
+                candidatos += _cadernos_extra(page)
             # Idempotência ANTES de baixar: se já está indexado, nem abre o caderno.
-            pendentes = [c for c in alvos if not (pular and pular(c["nome"], edition_date))]
-            for c in alvos:
+            pendentes = [c for c in candidatos if not (pular and pular(c["nome"], edition_date))]
+            for c in candidatos:
                 if c not in pendentes:
                     _log(f"caderno '{c['nome']}' ja indexado ({edition_date}) -> nao baixa.")
                     resultados.append({**c, "bytes": None})
             if not pendentes:
-                _log("todos os cadernos leves ja indexados; nada a baixar.")
+                _log("todos os cadernos ja indexados; nada a baixar.")
                 # 'page' ja carregou a selecao; nada mais a fazer.
-            links = _coletar_links_cadernos(page, pendentes) if pendentes else {}
+            # O caderno extra já traz a URL do próprio link; os fixos são casados
+            # pelo texto, como sempre.
+            links = _coletar_links_cadernos(page, [c for c in pendentes if not c.get("extra")])
+            links.update({c["chave"]: c["url"] for c in pendentes if c.get("extra")})
             for c in pendentes:
                 url = links.get(c["chave"])
                 if not url:

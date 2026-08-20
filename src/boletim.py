@@ -21,13 +21,13 @@ Duas fontes possíveis, mesmo resultado:
   - chamado pela linha de comando, lendo a 002A do Oracle (para refazer o
     boletim de uma edição já processada, sem gastar IA).
 
-A seção 2 sai recortada pela subsecretaria de SUBSEC_BOLETIM (hoje SUBCINT); as
-demais continuam com a SEFAZ inteira, e a 002A guarda tudo (ver SUBSECRETARIAS).
+Todas as seções saem com a SEFAZ inteira. A seção 2 PODE ser recortada por
+subsecretaria (SUBSEC_BOLETIM / --subsecretaria), mas o padrão é não recortar.
 
 Uso:
     python src/boletim.py                      # última edição gravada na 002A
     python src/boletim.py --date 2026-08-17
-    python src/boletim.py --subsecretaria TODAS   # seção 2 com a SEFAZ inteira
+    python src/boletim.py --subsecretaria SUBCINT  # seção 2 só da SUBCINT
 ============================================================================
 """
 import argparse
@@ -43,7 +43,7 @@ import oracle_db
 # (e são as MESMAS usadas na seção 3): importar evita duas implementações que um
 # dia divergem em silêncio.
 from monitor_estruturado import (_carregar_monitorados, _casa_nome, _dehifenizar,
-                                 _norm, _tokens_nome)
+                                 _norm, _tokens_nome, mascarar_cpf)
 
 # Identidade visual: o mesmo azul do resumo executivo e do front-end.
 _AZUL = "#1F4E79"
@@ -139,9 +139,15 @@ SUBSECRETARIAS = {
     },
 }
 
-# Recorte padrão da seção 2 no boletim diário. None = SEFAZ inteira (o que era o
-# comportamento até aqui). A linha de comando sobrepõe com --subsecretaria.
-SUBSEC_BOLETIM = "SUBCINT"
+# Recorte padrão da seção 2 no boletim diário. None = SEFAZ inteira.
+#
+# Voltou para None em 20/08/2026, a pedido da área: a seção 2 tinha saído
+# recortada na SUBCINT, que é ~3% da movimentação de pessoal da SEFAZ, e o que se
+# quer ler é a movimentação da Secretaria inteira. A maquinaria do recorte
+# (SUBSECRETARIAS, _e_da_subsecretaria) continua aqui e testada — para voltar a
+# recortar, basta `--subsecretaria SUBCINT` na linha de comando ou repor a sigla
+# nesta constante.
+SUBSEC_BOLETIM = None
 
 # Faixas de urgência do rótulo da seção 1, contadas da edição até o prazo.
 # É rótulo de leitura, não de negócio: serve para o olho achar primeiro o que
@@ -160,12 +166,16 @@ PALAVRAS_POR_MINUTO = 200
 #  Normalização dos itens (memória ou 002A -> um formato só)
 # ============================================================================
 def _txt(valor):
-    """Valor de campo como texto limpo. DATE do Oracle vira DD/MM/AAAA."""
+    """Valor de campo como texto limpo. DATE do Oracle vira DD/MM/AAAA.
+
+    Passa por `mascarar_cpf`: todo campo do boletim entra por aqui, então este é o
+    ponto único onde o CPF que veio transcrito do D.O. sai mascarado — vale para os
+    itens em memória e para os relidos da 002A."""
     if valor is None:
         return ""
     if hasattr(valor, "strftime"):
         return valor.strftime("%d/%m/%Y")
-    return " ".join(str(valor).split())
+    return mascarar_cpf(" ".join(str(valor).split()))
 
 
 def de_002a(registros):
@@ -204,7 +214,10 @@ _NOME = rf"[A-ZÀ-Ý][a-zà-ÿ'’.-]+(?:\s+{_PALAVRA}){{1,5}}"
 # O número da edição vem SEMPRE depois do ano romano, na tarja do IOERJ
 # ("ANO LII - Nº 147"). Casar só por "Nº \d+" pegaria o primeiro decreto da
 # página ("DECRETO Nº 50.426" virava edição nº 50).
-_RX_NUMERO_EDICAO = re.compile(r"ANO\s+[IVXLCDM]+\s*[-–—]\s*N[ºo°]\s*(\d{1,4})\b",
+# O sufixo de letra é o que distingue a EDIÇÃO EXTRA: a extra de 07/08/2026 saiu
+# como "ANO LII - Nº 142-A", contra "Nº 142" da normal do mesmo dia. Sem capturar
+# o "-A", os dois boletins do dia sairiam com o mesmo número de edição no topo.
+_RX_NUMERO_EDICAO = re.compile(r"ANO\s+[IVXLCDM]+\s*[-–—]\s*N[ºo°]\s*(\d{1,4}(?:-[A-Z])?)\b",
                                re.IGNORECASE)
 _RX_GOVERNADOR = re.compile(rf"GOVERNADOR(\s+EM\s+EXERC[ÍI]CIO)?\s+({_NOME})")
 _RX_SECRETARIO = re.compile(rf"SECRETARIA DE ESTADO DE FAZENDA\s+({_NOME})")
@@ -214,21 +227,27 @@ _RX_SECRETARIO = re.compile(rf"SECRETARIA DE ESTADO DE FAZENDA\s+({_NOME})")
 _JANELA_EXPEDIENTE = 2500
 
 
-def _paginas_um(date):
-    """[(caderno, texto da página 1)] da edição, em ordem de caderno."""
+def _paginas_um(date, extra=None):
+    """[(caderno, texto da página 1)] da edição, em ordem de caderno.
+
+    `extra` separa as duas publicações do mesmo dia (None = ambas, False = só a
+    normal, True = só a extra). Sem isso, o boletim da edição extra leria o
+    cabeçalho da normal, que vem primeiro na ordem alfabética do caderno."""
     if not config.DB_PATH.exists():
         return []
+    filtro = {None: "", False: " AND caderno NOT LIKE ?", True: " AND caderno LIKE ?"}[extra]
+    args = (date,) if extra is None else (date, f"%{config.EXTRA_CADERNO_SUFIXO}%")
     con = sqlite3.connect(config.DB_PATH)
     try:
         return con.execute(
-            "SELECT caderno, content FROM pages WHERE date=? AND page=1 ORDER BY caderno",
-            (date,),
+            f"SELECT caderno, content FROM pages WHERE date=? AND page=1{filtro} "
+            "ORDER BY caderno", args,
         ).fetchall()
     finally:
         con.close()
 
 
-def cabecalho_edicao(date):
+def cabecalho_edicao(date, extra=None):
     """Número da edição, governador e secretário de Fazenda -> dict.
 
     Tudo é OPCIONAL: se o MinerU não trouxe o cabeçalho daquele dia (acontece na
@@ -236,7 +255,7 @@ def cabecalho_edicao(date):
     boletim simplesmente não a menciona. Inventar número de edição seria pior."""
     dados = {"numero": "", "governador": "", "governador_exercicio": False,
              "secretario": ""}
-    for caderno, texto in _paginas_um(date):
+    for caderno, texto in _paginas_um(date, extra):
         topo = (texto or "")[:_JANELA_EXPEDIENTE]
         if not dados["numero"]:
             m = _RX_NUMERO_EDICAO.search(topo)
@@ -507,14 +526,16 @@ def _minutos_leitura(corpo_html):
 
 
 def render(date, itens, n_monitorados=None, parcial=False, blocos_falha=0,
-           blocos_total=0, subsec=SUBSEC_BOLETIM):
+           blocos_total=0, subsec=SUBSEC_BOLETIM, extra=False):
     """Monta o HTML do boletim da edição. Devolve a página inteira, em texto.
 
     `n_monitorados` é quantos nomes estavam VIGENTES na 002N naquela edição — o
     denominador da seção 3 ("2 de 19 nomes"). Se não vier, é lido do banco.
     `parcial` marca no topo que a rodada da IA teve bloco falhado: um boletim
     incompleto que se anuncia completo é pior do que não ter boletim.
-    `subsec` recorta APENAS a seção 2 por subsecretaria (None = SEFAZ inteira)."""
+    `subsec` recorta APENAS a seção 2 por subsecretaria (None = SEFAZ inteira).
+    `extra` marca que este é o boletim da EDIÇÃO EXTRA — um COMPLEMENTO ao do
+    dia, não um substituto."""
     itens = list(itens or [])
     if n_monitorados is None:
         try:
@@ -523,7 +544,7 @@ def render(date, itens, n_monitorados=None, parcial=False, blocos_falha=0,
         except Exception:  # noqa: BLE001 - o boletim não cai por causa do denominador
             n_monitorados = 0
 
-    cab = cabecalho_edicao(date)
+    cab = cabecalho_edicao(date, extra=True if extra else None)
     nomes = _por_categoria(itens, "NOMES_MONITORADOS")
     prazos = _ordena_prazos(_por_categoria(itens, "PRAZO_CRITICO"), date)
     # Seção 2: guarda o total SEFAZ antes de recortar, para poder dizer quantos
@@ -595,14 +616,25 @@ def render(date, itens, n_monitorados=None, parcial=False, blocos_falha=0,
     ) if x]
 
     aviso = ""
+    # A tarja da edição extra vem PRIMEIRO e é obrigatória: a extra costuma ter
+    # poucas páginas, então quase todas as seções saem com "Nenhum ... nesta
+    # edição". Sem dizer que é complemento, este boletim se parece com um boletim
+    # diário que falhou.
+    if extra:
+        aviso += ('<p class="extra">EDIÇÃO EXTRA — este boletim cobre APENAS o caderno '
+                  f"extra publicado em {_e(_data_br(date))}. O boletim da edição normal "
+                  "do dia foi enviado à parte; as seções vazias aqui significam que o "
+                  "caderno extra não trouxe nada daquele tipo.</p>")
     if parcial:
-        aviso = ('<p class="parcial">BOLETIM PARCIAL — '
-                 f"{blocos_falha} de {blocos_total} blocos falharam na leitura por IA. "
-                 "Seções podem estar incompletas; regenere quando a IA normalizar.</p>")
+        aviso += ('<p class="parcial">BOLETIM PARCIAL — '
+                  f"{blocos_falha} de {blocos_total} blocos falharam na leitura por IA. "
+                  "Seções podem estar incompletas; regenere quando a IA normalizar.</p>")
 
+    titulo = ("[DOERJ] Monitoramento SEFAZ" + (" - EDICAO EXTRA" if extra else "")
+              + f" - {_data_br(date)}")
     return f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>[DOERJ] Monitoramento SEFAZ - {_e(_data_br(date))}</title>
+<title>{_e(titulo)}</title>
 <style>
  body{{font-family:Segoe UI,Calibri,Arial,sans-serif;color:#2b2b2b;max-width:900px;
       margin:0 auto;padding:24px;line-height:1.55}}
@@ -616,13 +648,15 @@ def render(date, itens, n_monitorados=None, parcial=False, blocos_falha=0,
  .contagem{{font-style:italic;color:{_CINZA};font-size:14px;margin:0 0 10px}}
  .parcial{{background:#fdecea;border-left:4px solid #b00020;color:#b00020;
           font-weight:bold;font-size:13.5px;padding:9px 12px;margin:0 0 18px}}
+ .extra{{background:#fff4e0;border-left:4px solid #b06a00;color:#7a4a00;
+        font-weight:bold;font-size:13.5px;padding:9px 12px;margin:0 0 18px}}
  table{{border-collapse:collapse;margin-top:8px;font-size:13px;width:100%}}
  td,th{{border:1px solid #DCE3EA;padding:6px 10px;text-align:left;vertical-align:top}}
  th{{background:#F0F5F9;color:#41525F}}
  .rodape{{margin-top:28px;color:{_CINZA};font-size:12px;border-top:1px solid #DCE3EA;
          padding-top:12px}}
 </style></head><body>
-<h1>[DOERJ] Monitoramento SEFAZ-RJ</h1>
+<h1>[DOERJ] Monitoramento SEFAZ-RJ{" — EDIÇÃO EXTRA" if extra else ""}</h1>
 <div class="sub">{_e(" | ".join(identificacao))} · leitura ~{_minutos_leitura(corpo_html)} min</div>
 {aviso}
 {corpo_html}
@@ -637,13 +671,15 @@ estruturado(s) na edição de {_e(_data_br(date))}.</div>
 
 
 def gerar(date=None, itens=None, destino=None, n_monitorados=None, parcial=False,
-          blocos_falha=0, blocos_total=0, subsec=SUBSEC_BOLETIM):
+          blocos_falha=0, blocos_total=0, subsec=SUBSEC_BOLETIM, extra=False):
     """Escreve `relatorios/boletim_<data>.html` e devolve o caminho.
 
     Sem `itens`, lê a edição na 002A do Oracle (é o caminho da linha de comando).
     Rodada parcial sai como `boletim_<data>_PARCIAL.html`, pela mesma razão do
     Excel: não sobrescrever um boletim completo por um pela metade.
-    `subsec` recorta a seção 2 (None = SEFAZ inteira)."""
+    `subsec` recorta a seção 2 (None = SEFAZ inteira).
+    `extra` gera o boletim da EDIÇÃO EXTRA (`boletim_<data>_EXTRA.html`), que é um
+    arquivo à parte — o da edição normal do dia continua intacto."""
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
@@ -659,19 +695,23 @@ def gerar(date=None, itens=None, destino=None, n_monitorados=None, parcial=False
     if itens is None:
         if not oracle_db.configurado() or not config.oracle_settings().get("table_monitor"):
             sys.exit("[ERRO] Oracle/002A nao configurado no .env - sem itens para o boletim.")
-        registros = oracle_db.listar_monitoramento(date)
+        registros = oracle_db.listar_monitoramento(date, extra=extra)
         if not registros:
-            sys.exit(f"[ERRO] a 002A nao tem registro da edicao {date}. "
+            sys.exit(f"[ERRO] a 002A nao tem registro da edicao {date}"
+                     f"{' (EDICAO EXTRA)' if extra else ''}. "
                      "Rode antes: python src/monitor_estruturado.py")
-        print(f"[boletim] {len(registros)} registro(s) lidos da 002A para a edicao {date}")
+        print(f"[boletim] {len(registros)} registro(s) lidos da 002A para a edicao {date}"
+              f"{' (EDICAO EXTRA)' if extra else ''}")
         itens = de_002a(registros)
 
     destino = Path(destino) if destino else config.RELATORIOS_DIR
     destino.mkdir(parents=True, exist_ok=True)
-    arquivo = destino / f"boletim_{date}{'_PARCIAL' if parcial else ''}.html"
+    arquivo = (destino /
+               f"boletim_{date}{'_EXTRA' if extra else ''}{'_PARCIAL' if parcial else ''}.html")
     arquivo.write_text(
         render(date, itens, n_monitorados=n_monitorados, parcial=parcial,
-               blocos_falha=blocos_falha, blocos_total=blocos_total, subsec=subsec),
+               blocos_falha=blocos_falha, blocos_total=blocos_total, subsec=subsec,
+               extra=extra),
         encoding="utf-8")
     print(f"[ok] {arquivo}")
     return arquivo
@@ -683,9 +723,11 @@ def main():
         description="Gera o boletim HTML (formato do e-mail) de uma edicao do DOERJ.")
     ap.add_argument("--date", default=None, help="Edicao AAAA-MM-DD (padrao: a mais recente)")
     ap.add_argument("--dir", default=None, help="Pasta de destino (padrao: <projeto>/relatorios)")
+    ap.add_argument("--extra", action="store_true",
+                    help="Boletim da EDICAO EXTRA do dia (boletim_<data>_EXTRA.html)")
     ap.add_argument("--subsecretaria", default=SUBSEC_BOLETIM,
-                    help=f"Recorta a secao 2 por subsecretaria (padrao: {SUBSEC_BOLETIM}; "
-                         "use TODAS para a SEFAZ inteira). "
+                    help="Recorta a secao 2 por subsecretaria (padrao: "
+                         f"{SUBSEC_BOLETIM or 'TODAS, a SEFAZ inteira'}). "
                          f"Siglas: {', '.join(SUBSECRETARIAS)}")
     args = ap.parse_args()
     subsec = args.subsecretaria
@@ -694,8 +736,9 @@ def main():
     elif subsec.strip().upper() not in SUBSECRETARIAS:
         sys.exit(f"[ERRO] subsecretaria '{subsec}' desconhecida. "
                  f"Use TODAS ou uma de: {', '.join(SUBSECRETARIAS)}")
-    gerar(date=args.date, destino=args.dir, subsec=subsec)
+    gerar(date=args.date, destino=args.dir, subsec=subsec, extra=args.extra)
 
 
 if __name__ == "__main__":
     main()
+

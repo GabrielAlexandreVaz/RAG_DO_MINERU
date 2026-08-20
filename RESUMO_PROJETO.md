@@ -50,7 +50,7 @@ Site (Flask, http://127.0.0.1:5001), à parte: busca BM25 -> Claude -> tabela + 
 | Arquivo | Papel |
 |---|---|
 | `config.py` | Configuração central (.env, caminhos, modelo, relê a chave) |
-| `run_pipeline.py` | **Orquestra** as 5 etapas do job diário, em subprocessos |
+| `run_pipeline.py` | **Orquestra** as 7 etapas do job diário, em subprocessos |
 | `download_diario.py` | Baixa o D.O. do portal do IOERJ (Playwright) |
 | `extrair.py` | MinerU: PDF → texto (`content_list.json`), **em fatias** para não estourar a memória |
 | `index_build.py` | Texto do MinerU → índice FTS5 (`--latest`, `--extract`, `--force`) |
@@ -58,7 +58,9 @@ Site (Flask, http://127.0.0.1:5001), à parte: busca BM25 -> Claude -> tabela + 
 | `search.py` | Busca BM25, datas disponíveis, texto de uma página, `pages_matching` (todas as páginas de um tema) |
 | `reader.py` | Chama o Claude e devolve a resposta **estruturada** (resumo + itens) |
 | `atos_pessoal.py` | **Job**: atos de pessoal → Oracle 001A (palavras-chave da 001B) |
-| `monitor_estruturado.py` | **Job**: monitor 8 seções → Oracle 002A + Excel (002B e 002N) |
+| `monitor_estruturado.py` | **Job**: monitor 8 seções → Oracle 002A + Excel (002B e 002N). `--extra` lê só o caderno da edição extra |
+| `boletim.py` | Boletim HTML no formato do e-mail (`--extra` para a edição extra) |
+| `enviar_email.py` | **Job**: manda o boletim no corpo do e-mail pela API corporativa (um POST por destinatário, 1x por edição; `.json` de conferência com `EMAIL_ENVIO_ATIVO=false`) |
 | `oracle_db.py` | Leitura das tabelas de configuração e gravação nas de dados |
 | `limpar.py` | Retenção de disco: apaga `saida/` antiga e rotaciona o log |
 | `export.py` | Gera **Excel / PDF / JSON** (só a tabela, sem cabeçalho de pergunta) |

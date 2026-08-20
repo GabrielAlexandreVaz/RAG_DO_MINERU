@@ -103,6 +103,94 @@ Não confundir com `src/resumo_executivo.py`, que gera outro documento a partir 
 as séries homogêneas são consolidadas e cada item vem com a matriz de rastreabilidade, para a
 validação da área. O boletim é a leitura item a item.
 
+### CPF sai mascarado
+
+O que vai no relatório é transcrição do D.O., e o D.O. publica CPF por extenso (quadros de
+licença-prêmio, listas de intimação). Nas saídas — Excel, boletim, export da 002A e resumo
+executivo — o número sai como `097.XXX.XXX-65`: ficam os 3 primeiros dígitos e os 2 do
+verificador, o suficiente para conferir na publicação. O mascaramento é na SAÍDA
+(`monitor_estruturado.mascarar_cpf`), não na coleta: a 002A guarda a transcrição fiel, e por isso
+uma edição antiga regerada também sai mascarada.
+
+## Edição extra
+
+Em alguns dias o IOERJ publica uma segunda edição. Ela **não é uma data nova**: sai na mesma
+página de seleção do portal como um caderno A MAIS —
+`Parte I (Poder Executivo) EDIÇÃO EXTRA` — e traz o número do dia com sufixo (`Nº 142-A`).
+
+Como toda a idempotência do pipeline tem a data como chave, antes ela se perdia em silêncio: o
+download via o PDF do dia no disco e saía por cache, o monitor via o Excel do dia e saía antes da
+IA. O passo 3 (`ler_cadernos`) agora enumera os links da página de seleção e indexa o caderno
+extra com rótulo próprio; o passo 6 (`monitor_estruturado.py --extra`) lê **só** esse caderno — o
+diário do dia não é relido — e produz saída à parte:
+
+| Arquivo | Observação |
+|---|---|
+| `monitoramento_<data>_EXTRA.xlsx` | trava de reprocessamento: sai mesmo sem item relevante |
+| `boletim_<data>_EXTRA.html` | só sai se houver item — é ele que dispara o e-mail |
+
+Na 002A as duas publicações dividem a mesma `DATA_EDICAO` e são separadas pela **faixa de ID**:
+edição normal em `AAAAMMDD0001..4999`, extra em `AAAAMMDD5000..9999`. Por isso o `DELETE` de
+`salvar_monitoramento` apaga só a faixa da publicação que está sendo gravada — apagar por data
+levaria a outra junto.
+
+Não é todo dia que tem edição extra. Nos dias em que não tem, o passo 6 sai em menos de um
+segundo, sem chamar a IA e sem gerar arquivo.
+
+## Boletim por e-mail
+
+O passo 7 (`src/enviar_email.py`) manda o boletim HTML **no corpo** da mensagem, de
+`EMAIL_REMETENTE` para `EMAIL_DESTINATARIOS` (ver `.env.example`). Duas travas, porque o job roda
+de hora em hora: só envia se existir o boletim canônico (rodada PARCIAL não envia) e só uma vez
+por edição, marcada por `relatorios/email_enviado_<data>.txt`.
+
+**Não é SMTP.** O envio é um `POST` na API corporativa de e-mail — a mesma que os sistemas Java
+chamam pelo `EmailClient` — com `Authorization: Bearer <token>` e o corpo no formato do
+`EmailRequestDTO`:
+
+```json
+{"to": "...", "from": "...", "subject": "...", "corpo": "<html>…</html>", "sistema": "RAG_DOERJ"}
+```
+
+Três consequências do contrato:
+
+- o DTO tem **um** destinatário, sem cópia e sem `Reply-To`: a lista do `.env` (destinatários +
+  cópia) vira **uma requisição por endereço**. Se só parte receber, o recibo sai como
+  `email_enviado_<data>_PARCIAL.txt` com quem já recebeu, e a rodada seguinte tenta **só os que
+  faltaram** — ninguém recebe o mesmo boletim duas vezes;
+- sem `Reply-To`, a resposta que o rodapé pede volta para o `EMAIL_REMETENTE`;
+- fora do ambiente `prd` (`EMAIL_AMBIENTE`), só sai e-mail para domínio interno — a mesma trava do
+  `EmailClient`, repetida aqui para o bloqueio aparecer no log em vez de virar um 4xx opaco.
+
+**São dois tokens, e confundi-los custa uma tarde.** O `AUTORIZADOR_TOKEN` do `.env` (claims
+`aplicacao: AUTORIZADOR-SERVICE`, `tipoToken: AUTH`) **não** é aceito pela API de e-mail: ele é a
+credencial de entrada do autorizador. A cada envio o código faz o que o `AutorizadorClient` faz no
+Java —
+
+```
+POST <autorizador>/api/v1/usuario/autenticar
+Authorization: Bearer <AUTORIZADOR_TOKEN>     (sem corpo)
+-> CredencialDTO {token, dataHoraExpiracao, ...}   <- este, tipoToken: ACCESS, é o do envio
+```
+
+— e guarda a credencial até a expiração. Mandar o token de entrada direto no `/email/enviar` dá
+**403 com corpo vazio, idêntico ao de uma requisição sem header nenhum** — é o sintoma a
+reconhecer. Se chegar 400 ou 500, ao contrário, a autenticação passou e o problema é o corpo.
+
+`AUTORIZADOR_AMBIENTE` (`beta` | `prd`) manda em duas coisas, como o `autorizador.ambiente` do
+Java: qual autorizador vale e se a trava de domínio está ligada.
+
+Com `EMAIL_ENVIO_ATIVO=false` — o padrão — nada é enviado: as requisições são montadas e gravadas
+em `relatorios/email_<data>.json` (com o token mascarado) para conferência; o boletim em si abre no
+navegador, em `relatorios/boletim_<data>.html`.
+
+```bash
+python src/enviar_email.py --dry-run          # só grava o .json
+python src/enviar_email.py --date 2026-08-19 --extra
+python src/enviar_email.py --force            # reenvia (ignora o marcador)
+python src/enviar_email.py --para eu@fazenda.rj.gov.br   # teste em um endereço só
+```
+
 ## Palavras-chave dos atos de pessoal
 
 `src/atos_pessoal.py` procura no D.O. os atos de pessoal e grava na **001A**. O que ele procura vem

@@ -239,7 +239,11 @@ SYSTEM = (
     "tenha materia da SEFAZ, e mesmo que o servidor um dia tenha passado pela Fazenda. Excecao: "
     "cessao/permuta em que a SEFAZ, o Rioprevidencia OU o Fundo Unico de Previdencia e a origem "
     "ou o destino do servidor. Vale mesmo que o OUTRO lado seja um orgao de fora: a cessao de um "
-    "servidor da SEEDUC PARA o Rioprevidencia ENTRA (o destino esta no escopo).\n\n"
+    "servidor da SEEDUC PARA o Rioprevidencia ENTRA (o destino esta no escopo).\n"
+    "NAO EXTRAIA (pedido da area): CONCESSAO DE PENSAO - pensao por morte, pensao especial, "
+    "pensao provisoria -, mesmo quando o ato e do Rioprevidencia ou do Fundo Unico de "
+    "Previdencia. E ato consumado, sem acao nem prazo para a SEFAZ, e fica fora do "
+    "relatorio. Outros atos de pensao (revisao, reajuste, cessacao) continuam valendo.\n\n"
     "Responda EXCLUSIVAMENTE com um objeto JSON valido (sem texto antes/depois, sem ```), no "
     'formato: {"itens":[{"categoria":"","tipo_ato":"","numero_ano":"","orgao":"","pessoa":"",'
     '"cargo":"","processo":"","vigencia":"","data_ato":"","prazo":"","dias_carencia":"",'
@@ -262,7 +266,7 @@ SYSTEM = (
     "(mesmo que quem cumpra o prazo sejam os licitantes: a SEFAZ conduz a sessao). So se o "
     "titular OU o condutor do prazo for a SEFAZ/Rioprevidencia (nao terceiro).\n"
     "NAO E PRAZO_CRITICO (vao para OBSERVACAO_EXECUTIVA): ato JA CONSUMADO sem acao pendente - "
-    "deferimento/concessao de isencao, concessao de aposentadoria/pensao, defesa ja julgada. "
+    "deferimento/concessao de isencao, concessao de aposentadoria, defesa ja julgada. "
     "So e PRAZO_CRITICO se houver uma ACAO A CUMPRIR ate uma data futura.\n"
     "PRAZO: 'prazo' e uma DATA (DD/MM/AAAA) ou \"\". NUNCA escreva texto relativo nele "
     "('30 dias', '15 dias apos a publicacao'): a coluna e DATE e o valor se perde.\n"
@@ -424,16 +428,25 @@ def _paginas_relevantes(caderno, date, rx):
             for r in rows if _pagina_relevante(r[4], rx)]
 
 
-def _cadernos_da_edicao(date):
+def _cadernos_da_edicao(date, extra=None):
     """Nomes dos cadernos já indexados nesta edição (Parte I, IB, II, IV, V).
 
     Vem do índice, e não de config.CADERNOS, para o monitor processar só o que
     de fato foi lido — se um caderno falhou no download, ele simplesmente não
-    aparece aqui."""
+    aparece aqui.
+
+    `extra` separa a EDIÇÃO EXTRA da edição normal do mesmo dia:
+      None  -> todos os cadernos (uso geral);
+      False -> só a edição normal. É o que a rodada diária usa, e não é opcional:
+               sem o filtro, o caderno extra indexado de tarde entraria no Excel e
+               na 002A da edição normal, misturando as duas publicações;
+      True  -> só os cadernos de edição extra."""
+    filtro = {None: "", False: " AND caderno NOT LIKE ?", True: " AND caderno LIKE ?"}[extra]
+    args = (date,) if extra is None else (date, f"%{config.EXTRA_CADERNO_SUFIXO}%")
     con = sqlite3.connect(config.DB_PATH)
     try:
         rows = con.execute(
-            "SELECT DISTINCT caderno FROM pages WHERE date=? ORDER BY caderno", (date,)
+            f"SELECT DISTINCT caderno FROM pages WHERE date=?{filtro} ORDER BY caderno", args
         ).fetchall()
     finally:
         con.close()
@@ -491,6 +504,75 @@ def _limpar_html(texto):
     if ini_caco != -1 and t.find(">", ini_caco) == -1:
         t = t[:ini_caco]                          # tag que ficou sem fechar no fim
     return " ".join(_RE_TAG.sub(" ", t).split())
+
+
+# --------------------------------------------------------------------------
+# CPF nos trechos transcritos do D.O.
+# --------------------------------------------------------------------------
+# O que sai no relatório é transcrição do D.O., e o D.O. publica o CPF por
+# extenso: o quadro de licença-prêmio da edição de 18/08/2026 levou o CPF do
+# Secretário para o boletim ("097.598.377-65"), e as listas de intimação levam o
+# dos contribuintes. A área pediu que o número não apareça mais nos entregáveis.
+# Fica só o que serve para CONFERIR na publicação — os 3 primeiros dígitos e os 2
+# do verificador: 097.XXX.XXX-65.
+#
+# Mascaramos na SAÍDA (Excel, boletim, resumo executivo), não na coleta: a 002A
+# guarda a transcrição fiel, e assim uma edição antiga regerada também sai
+# mascarada.
+#
+# O MinerU devolve as tabelas com os dígitos separados por espaço, então o espaço é
+# aceito entre TODOS os caracteres ("0 9 7 . 5 9 8 . 3 7 7 - 6 5"). CNPJ
+# (00.000.000/0000-00) não casa, por causa da barra.
+_RX_CPF = re.compile(r"(?<!\d)(\d\s*\d\s*\d)\s*\.\s*\d\s*\d\s*\d\s*\.\s*"
+                     r"\d\s*\d\s*\d\s*-\s*(\d\s*\d)(?!\d)")
+
+# O trecho da seção 3 é recortado por POSIÇÃO (40 caracteres antes do nome), então
+# às vezes começa no meio do CPF — o boletim de 18/08/2026 abriu um item com
+# ". 6 2 5 . 8 7 7 - 2 8". O que sobrou do número também tem de sair mascarado.
+# Só vale no COMEÇO do texto, que é onde o corte acontece: solto no meio, o padrão
+# 'ddd.ddd-dd' casaria valor de tabela de anexo de decreto ("10.000.000 - 12").
+_RX_CPF_CORTADO = re.compile(r"^([\s.,;:-]*)\d\s*\d\s*\d\s*\.\s*"
+                             r"\d\s*\d\s*\d\s*-\s*(\d\s*\d)(?!\d)")
+
+
+def _digitos(s):
+    """'6 5' -> '65' (os grupos do padrão vêm com o espaço do MinerU dentro)."""
+    return "".join((s or "").split())
+
+
+def mascarar_cpf(valor):
+    """Texto com os CPFs mascarados ('097.598.377-65' -> '097.XXX.XXX-65').
+
+    O CPF inteiro primeiro; só então o cortado — nessa ordem um CPF completo logo
+    no início do texto já saiu mascarado e não casa mais com a segunda regra."""
+    texto = _RX_CPF.sub(
+        lambda m: f"{_digitos(m.group(1))}.XXX.XXX-{_digitos(m.group(2))}", str(valor or ""))
+    return _RX_CPF_CORTADO.sub(
+        lambda m: f"{m.group(1)}XXX.XXX-{_digitos(m.group(2))}", texto)
+
+
+# --------------------------------------------------------------------------
+# Concessão de pensão — fora do relatório (pedido da área, 19/08/2026)
+# --------------------------------------------------------------------------
+# São atos JÁ CONSUMADOS do Rioprevidência / Fundo Único, sem ação nem prazo para
+# a SEFAZ: na edição de 19/08/2026 foram 4 itens praticamente idênticos ocupando a
+# seção de observações executivas. O SYSTEM já manda não extraí-los; este filtro é
+# a conferência do código, para o dia em que o modelo trouxer um assim mesmo.
+#
+# O ato é reconhecido pelo `tipo_ato` ou pela ABERTURA do resumo — mesma regra de
+# _tipo_pelo_resumo: o ato é o que a frase abre, não o que ela cita de passagem.
+# Assim um decreto de crédito suplementar que MENCIONA pensões continua entrando,
+# e uma revisão/reajuste de pensão (outro ato) também.
+_RX_PENSAO = re.compile(r"(?:concess|conced|defer)\w*\s+(?:de\s+|da\s+)?pensao"
+                        r"|pensao\s+(?:por\s+morte|especial|provisoria|vitalicia)")
+_ABERTURA_RESUMO = 200
+
+
+def _e_concessao_pensao(item):
+    """True se o ATO é uma concessão de pensão (o que a área pediu para não sair)."""
+    if _RX_PENSAO.search(_norm(item.get("tipo_ato"))):
+        return True
+    return bool(_RX_PENSAO.search(_norm(item.get("resumo"))[:_ABERTURA_RESUMO]))
 
 
 def _tokens_nome(nome):
@@ -560,18 +642,25 @@ def _carregar_monitorados(date):
             "arquivo monitorados.txt")
 
 
-def _scan_monitorados(date):
+def _scan_monitorados(date, cadernos=None):
     """Varredura textual DETERMINÍSTICA dos nomes monitorados nos 5 cadernos da
     edição. Não usa IA. Devolve (itens NOMES_MONITORADOS - um por nome+página -,
-    origem da lista, nº de nomes vigentes)."""
+    origem da lista, nº de nomes vigentes).
+
+    `cadernos` limita a varredura (a rodada da edição extra lê só o caderno dela;
+    a normal, só os dela). Sem esse recorte, as duas rodadas do mesmo dia
+    devolveriam as mesmas menções."""
     monitorados, origem = _carregar_monitorados(date)
     if not monitorados:
         return [], origem, 0
+    sql = "SELECT caderno, page, content FROM pages WHERE date=?"
+    args = [date]
+    if cadernos is not None:
+        sql += f" AND caderno IN ({','.join('?' * len(cadernos))})"
+        args += list(cadernos)
     con = sqlite3.connect(config.DB_PATH)
     try:
-        linhas = con.execute(
-            "SELECT caderno, page, content FROM pages WHERE date=? ORDER BY caderno, page", (date,)
-        ).fetchall()
+        linhas = con.execute(sql + " ORDER BY caderno, page", args).fetchall()
     finally:
         con.close()
     # Normaliza cada página UMA vez (antes era 1x por nome x página, sobre o mesmo
@@ -678,14 +767,16 @@ def _pagina_do_offset(mapa, offset):
     return pagina
 
 
-def _scan_pautas(date):
+def _scan_pautas(date, cadernos=None):
     """Pautas do Conselho de Contribuintes da edição, uma por SESSÃO (data + hora).
 
     Determinístico, sem IA: acha cada cabeçalho de pauta, corta o bloco na próxima
     pauta ou na NOTA EXPLICATIVA e conta os "Recurso nº" de dentro. Devolve itens
-    PRAZO_CRITICO já no formato do relatório."""
+    PRAZO_CRITICO já no formato do relatório.
+
+    `cadernos` limita a varredura, pela mesma razão de _scan_monitorados."""
     itens, vistos = [], set()
-    for caderno in _cadernos_da_edicao(date):
+    for caderno in (cadernos if cadernos is not None else _cadernos_da_edicao(date)):
         texto, mapa = _texto_do_caderno(date, caderno)
         if not texto:
             continue
@@ -1087,7 +1178,9 @@ def _boletim_da_002a(date, destino):
         return
     try:
         import boletim
-        registros = oracle_db.listar_monitoramento(date)
+        # extra=False: o boletim da edição NORMAL não pode incluir os itens da
+        # edição extra do mesmo dia (ela tem boletim próprio).
+        registros = oracle_db.listar_monitoramento(date, extra=False)
         if registros:
             boletim.gerar(date=date, itens=boletim.de_002a(registros), destino=destino)
     except Exception as e:  # noqa: BLE001 - formato a mais nunca derruba o job
@@ -1095,7 +1188,7 @@ def _boletim_da_002a(date, destino):
               f"{type(e).__name__}: {str(e)[:200]}")
 
 
-def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
+def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False, extra=False):
     """Monta o monitoramento de UMA edição: Excel com 8 abas + gravação na 002A.
 
     O caminho completo, na ordem:
@@ -1112,6 +1205,11 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     *_PARCIAL.xlsx e NÃO grava no Oracle: melhor não ter o dado do que ter o dado
     pela metade, que passaria despercebido.
 
+    `extra=True` processa SOMENTE os cadernos de EDIÇÃO EXTRA da data, com saída
+    própria (`*_EXTRA.xlsx` / `boletim_<data>_EXTRA.html`) e faixa própria de ID na
+    002A. Não é todo dia que existe edição extra: nos dias normais este modo sai
+    logo no começo, antes de qualquer chamada de IA.
+
     `date` vazio = edição mais recente do índice. Devolve o caminho do Excel."""
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -1124,22 +1222,39 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
         if not datas:
             sys.exit("[ERRO] nenhuma edicao no indice.")
         date = datas[0]
+
+    # Quais cadernos esta rodada enxerga. O recorte da rodada NORMAL (extra=False)
+    # nao e opcional: sem ele, o caderno da edicao extra - indexado horas depois -
+    # entraria no Excel e na 002A da edicao normal, misturando as duas publicacoes.
+    cadernos = _cadernos_da_edicao(date, extra=True if extra else False)
+    if extra and not cadernos:
+        # O caso comum: a maioria dos dias nao tem edicao extra. Sai ANTES da IA,
+        # antes de exigir a chave de API e sem gerar arquivo nenhum.
+        print(f"[monitor] nenhum caderno de EDICAO EXTRA em {date} -> nada a fazer.")
+        return None
+
     if not config.current_api_key():
         sys.exit("[ERRO] ANTHROPIC_API_KEY nao definido no .env.")
 
     # Trava de idempotencia (para o pipeline horario): se o Excel CANONICO desta
     # edicao ja existe e nao e --force, nao re-extrai (economiza IA). O canonico so
     # e gravado numa rodada COMPLETA, entao existir = ja foi processada com sucesso.
+    # A edicao extra tem trava PROPRIA (sufixo _EXTRA): a do dia normal nao pode
+    # impedi-la, e vice-versa.
+    sufixo_extra = "_EXTRA" if extra else ""
     destino = Path(destino) if destino else config.RELATORIOS_DIR
     destino.mkdir(parents=True, exist_ok=True)
-    canonico = destino / f"monitoramento_{date}.xlsx"
+    canonico = destino / f"monitoramento_{date}{sufixo_extra}.xlsx"
     if canonico.exists() and not force:
         print(f"[monitor] {canonico.name} ja existe -> pulando (use --force para refazer).")
         # O boletim HTML nao gasta IA: se ele ainda nao existe (edicao processada
         # antes deste modulo, ou execucao anterior sem Oracle), monta a partir da
         # 002A em vez de deixar o dia sem boletim.
-        _boletim_da_002a(date, destino)
+        if not extra:
+            _boletim_da_002a(date, destino)
         return canonico
+    if extra:
+        print(f"[monitor] EDICAO EXTRA em {date}: {', '.join(cadernos)}")
 
     client = config.get_client()
     print(f"[monitor] modelo da extracao: {config.MONITOR_MODEL}"
@@ -1155,7 +1270,7 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
         rx_kw = _compilar_kw(kws)
         print(f"[monitor] pre-filtro: {len(kws)} termo(s) vigente(s) (fonte: {origem_kw})")
 
-    for caderno in _cadernos_da_edicao(date):
+    for caderno in cadernos:
         # Pré-filtro de custo: só páginas com termos SEFAZ vão para a IA (a menos
         # que --todas-paginas). Cadernos sem página relevante são pulados.
         if todas_paginas:
@@ -1179,6 +1294,15 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     for it in todos:
         it["categoria"] = _canon_categoria(it.get("categoria"))
 
+    # Concessão de pensão fica fora do relatório (pedido da área). O SYSTEM já pede
+    # que não venha; aqui o código confere. O descarte é CONTADO no log: item que
+    # some em silêncio é o que ninguém percebe que sumiu.
+    antes_pensao = len(todos)
+    todos = [it for it in todos if not _e_concessao_pensao(it)]
+    if len(todos) < antes_pensao:
+        print(f"[monitor] {antes_pensao - len(todos)} ato(s) de concessao de pensao "
+              "descartado(s) (pedido da area: fora do relatorio).")
+
     # Prazo contado em dias -> data. A IA leu os números; a soma é nossa.
     n_prazo, n_uteis = _calcular_prazos(todos, date)
     if n_prazo or n_uteis:
@@ -1188,14 +1312,14 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     # NOMES_MONITORADOS vem da varredura DETERMINÍSTICA (confiável, sem depender
     # da IA): descarta o que a IA marcou nessa categoria e usa a lista de nomes.
     todos = [it for it in todos if it.get("categoria") != "NOMES_MONITORADOS"]
-    monit, origem, n_vigentes = _scan_monitorados(date)
+    monit, origem, n_vigentes = _scan_monitorados(date, cadernos)
     todos.extend(monit)
 
     # Pautas do Conselho de Contribuintes: idem. A IA erra a contagem de recursos
     # e junta as sessões do dia; a varredura conta exato e separa por sessão. Só
     # descarta os itens de pauta da IA se a varredura achou pauta nesta edição —
     # se não achou, o item do modelo é melhor do que seção vazia.
-    pautas = _scan_pautas(date)
+    pautas = _scan_pautas(date, cadernos)
     if pautas:
         antes = len(todos)
         todos = [it for it in todos if not _e_item_pauta(it)]
@@ -1240,18 +1364,26 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     # *_PARCIAL.xlsx; só uma rodada sem falhas grava o nome canônico (destino já
     # criado na trava acima).
     sufixo = "" if completo else "_PARCIAL"
-    arquivo = destino / f"monitoramento_{date}{sufixo}.xlsx"
+    arquivo = destino / f"monitoramento_{date}{sufixo_extra}{sufixo}.xlsx"
     _build_xlsx(arquivo, date, todos, blocos_total, blocos_falha)
     # Mesma extracao, outro formato: o boletim HTML no layout do e-mail. Sai dos
     # itens em MEMORIA (nao depende do Oracle) e segue a mesma regra do Excel:
     # rodada parcial vira boletim_<data>_PARCIAL.html.
-    try:
-        import boletim
-        boletim.gerar(date=date, itens=todos, destino=destino, n_monitorados=n_vigentes,
-                      parcial=not completo, blocos_falha=blocos_falha,
-                      blocos_total=blocos_total)
-    except Exception as e:  # noqa: BLE001 - o boletim e um formato a mais, nao derruba o job
-        print(f"[ATENCAO] falha ao gerar o boletim HTML: {type(e).__name__}: {str(e)[:200]}")
+    #
+    # Na EDICAO EXTRA o boletim so sai se houver item: e ele que dispara o e-mail
+    # (regra da area: extra so notifica quando ha algo relevante). Sem item, o
+    # Excel fica gravado do mesmo jeito, porque e ele a trava de reprocessamento.
+    if extra and not todos:
+        print(f"[monitor][EXTRA] 0 item relevante na edicao extra de {date} -> Excel "
+              "gerado; boletim e e-mail NAO (regra: extra so notifica quando ha item).")
+    else:
+        try:
+            import boletim
+            boletim.gerar(date=date, itens=todos, destino=destino, n_monitorados=n_vigentes,
+                          parcial=not completo, blocos_falha=blocos_falha,
+                          blocos_total=blocos_total, extra=extra)
+        except Exception as e:  # noqa: BLE001 - o boletim e um formato a mais, nao derruba o job
+            print(f"[ATENCAO] falha ao gerar o boletim HTML: {type(e).__name__}: {str(e)[:200]}")
     if completo:
         print(f"[ok] Excel COMPLETO gerado -> {arquivo}")
     else:
@@ -1263,8 +1395,9 @@ def gerar(date=None, destino=None, chunk=4, todas_paginas=False, force=False):
     if completo:
         if oracle_db.configurado() and config.oracle_settings().get("table_monitor"):
             try:
-                n = oracle_db.salvar_monitoramento(date, todos)
-                print(f"[ok] {n} itens gravados no Oracle (002A) para a edicao {date}.")
+                n = oracle_db.salvar_monitoramento(date, todos, extra=extra)
+                print(f"[ok] {n} itens gravados no Oracle (002A) para a edicao {date}"
+                      f"{' (EDICAO EXTRA)' if extra else ''}.")
             except Exception as e:  # noqa: BLE001 - nao derruba o job por falha de banco
                 print(f"[ATENCAO] falha ao gravar no Oracle (002A): {type(e).__name__}: {str(e)[:200]}")
         else:
@@ -1326,7 +1459,9 @@ def _build_xlsx(arquivo, date, itens, blocos_total=None, blocos_falha=0):
                 # vazia no Excel) e texto que parece numero vira numero. Um resumo
                 # recortado do meio de uma tabela pode comecar com '=' (aconteceu
                 # em 03/08/2026). Aqui tudo e texto, sempre.
-                ws.write_string(li, c, str(it.get(chave, "") or ""), f_wrap)
+                # mascarar_cpf: o CPF vem no trecho transcrito do D.O. e nao pode
+                # sair por extenso na planilha (ver o comentario da funcao).
+                ws.write_string(li, c, mascarar_cpf(it.get(chave, "")), f_wrap)
         for c, w in enumerate(larg):
             ws.set_column(c, c, w)
         ws.freeze_panes(1, 0)
@@ -1345,9 +1480,12 @@ def main():
                     help="Desliga o pre-filtro SEFAZ e manda TODAS as paginas a IA (mais caro)")
     ap.add_argument("--force", action="store_true",
                     help="Reprocessa mesmo se o Excel canonico do dia ja existir (gasta IA)")
+    ap.add_argument("--extra", action="store_true",
+                    help="Le SOMENTE os cadernos de EDICAO EXTRA da data (saida *_EXTRA). "
+                         "Sai sem fazer nada nos dias sem edicao extra, que sao a maioria.")
     args = ap.parse_args()
     gerar(date=args.date, destino=args.dir, chunk=args.chunk,
-          todas_paginas=args.todas_paginas, force=args.force)
+          todas_paginas=args.todas_paginas, force=args.force, extra=args.extra)
 
 
 if __name__ == "__main__":

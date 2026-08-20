@@ -221,7 +221,74 @@ def _config_oracle():
     return f"001B={len(palavras)} | 002B={len(filtro)} | 002N={len(nomes)}"
 
 
-# --- 6. Índice -------------------------------------------------------------
+# --- 6. E-mail do boletim --------------------------------------------------
+# As duas checagens são NÃO essenciais de propósito: enquanto a API de e-mail
+# não estiver liberada, a máquina continua "pronta" (o passo 7 do pipeline só
+# grava o .json de conferência). Quando a credencial chegar, viram [ok] sem
+# nenhuma alteração de código.
+@checar("E-mail: configuracao do .env", essencial=False)
+def _email_cfg():
+    """Remetente, destinatários e credencial preenchidos, e se o envio está ligado.
+
+    Também avisa quando a trava de domínio do ambiente barraria a lista: em
+    homologação, um destinatário externo no .env vira erro só na hora do envio —
+    aqui ele aparece antes de a tarefa ser agendada."""
+    import config
+    from enviar_email import EmailBloqueado, validar_dominio
+    cfg = config.email_settings()
+    faltando = [n for n, v in [("EMAIL_REMETENTE", cfg["remetente"]),
+                               ("EMAIL_DESTINATARIOS", cfg["destinatarios"]),
+                               ("EMAIL_API_URL", cfg["url"]),
+                               ("AUTORIZADOR_TOKEN", cfg["token"]),
+                               (f"autorizador do ambiente '{cfg['ambiente']}'",
+                                cfg["autorizador_url"])] if not v]
+    if faltando:
+        raise RuntimeError("vazias: " + ", ".join(faltando))
+    try:
+        for endereco in cfg["destinatarios"] + cfg["copia"]:
+            validar_dominio(endereco, cfg)
+    except EmailBloqueado as e:
+        raise RuntimeError(str(e)) from e
+    modo = "ENVIO ATIVO" if cfg["ativo"] else "so grava .json (conferencia)"
+    return (f"{cfg['remetente']} -> {', '.join(cfg['destinatarios'])} | "
+            f"ambiente={cfg['ambiente']} | {modo}")
+
+
+@checar("E-mail: autorizador emite token e a API o aceita", essencial=False)
+def _email_api():
+    """Autentica no autorizador e chama a API com um POST vazio SÓ para ver como
+    ela responde — sem mandar e-mail nenhum (o corpo não tem destinatário nem
+    HTML).
+
+    É o teste que separa os cinco problemas que a infraestrutura resolve em
+    lugares diferentes: nome do host, firewall/proxy, certificado, credencial de
+    entrada e token emitido. Um HTTP 400/500 aqui é BOA notícia: significa que a
+    requisição chegou AUTENTICADA e só foi recusada pelo corpo vazio. O 403 é a
+    marca do token errado — a API responde igualzinho a quem não manda header."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    import config
+    from enviar_email import obter_token
+    cfg = config.email_settings()
+    if not cfg["url"]:
+        raise RuntimeError("EMAIL_API_URL vazia - aguardando a infraestrutura")
+    req = urllib.request.Request(
+        cfg["url"], data=json.dumps({}).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json; charset=utf-8",
+                 "Authorization": "Bearer " + obter_token(cfg)})
+    try:
+        with urllib.request.urlopen(req, timeout=cfg["timeout"]) as r:
+            return f"{cfg['url']} respondeu HTTP {r.status}"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise RuntimeError(f"HTTP {e.code} - token recusado "
+                               "(EMAIL_API_TOKEN vencido ou sem permissao)") from e
+        return f"{cfg['url']} alcancada, token aceito (HTTP {e.code} no corpo vazio)"
+
+
+# --- 7. Índice -------------------------------------------------------------
 @checar("Indice FTS5", essencial=False)
 def _indice():
     """Quantas edições há no índice FTS5. Não é essencial: numa instalação nova

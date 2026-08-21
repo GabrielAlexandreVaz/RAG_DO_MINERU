@@ -618,6 +618,46 @@ def _e_expediente(texto_norm, pos):
     return len(_RX_EXPEDIENTE.findall(texto_norm[ini:fim])) >= _EXPEDIENTE_MIN
 
 
+# Trecho publicado que acompanha cada menção na seção 3: quanto texto pegar antes
+# e depois do nome. São posições em CARACTERES, então as duas pontas caem no meio
+# de uma palavra — a seção saía com "aria de Estado de Planejamento" (de
+# "Secretaria") e terminando em "Ciência, Tecno". _janela_palavra conserta isso.
+_TRECHO_ANTES, _TRECHO_DEPOIS = 40, 160
+# Até onde vale alargar para fechar a palavra. Existe por causa das TABELAS: o
+# MinerU as devolve em HTML e há trechos longos sem espaço nenhum, onde alargar
+# "até o próximo espaço" arrastaria a linha inteira da tabela para o boletim.
+_TRECHO_MARGEM = 40
+
+
+def _janela_palavra(base, ini, fim):
+    """Alarga (ini, fim) até o espaço mais próximo, para não partir palavra.
+
+    Alarga para FORA, não para dentro: a palavra cortada entra inteira em vez de
+    ser descartada. Custa alguns caracteres a mais e devolve a leitura — quem lê
+    o boletim quer a frase publicada, não um recorte por régua."""
+    limite_esq = max(0, ini - _TRECHO_MARGEM)
+    while ini > limite_esq and not base[ini - 1].isspace():
+        ini -= 1
+    limite_dir = min(len(base), fim + _TRECHO_MARGEM)
+    while fim < limite_dir and not base[fim].isspace():
+        fim += 1
+    return ini, fim
+
+
+def _trecho_da_mencao(base, pos):
+    """O trecho publicado em volta da menção, pronto para o relatório.
+
+    As reticências não são enfeite: o trecho começa e termina no meio da matéria,
+    e sem elas o leitor lê como se fosse a frase inteira do D.O."""
+    ini, fim = _janela_palavra(base, max(0, pos - _TRECHO_ANTES),
+                               min(len(base), pos + _TRECHO_DEPOIS))
+    trecho = _limpar_html(base[ini:fim])
+    if not trecho:
+        return ""
+    return (("... " if ini > 0 else "") + trecho
+            + (" ..." if fim < len(base) else ""))
+
+
 def _carregar_monitorados(date):
     """Lista de monitorados VIGENTES na edição -> ([{"nome","funcao"}], origem).
 
@@ -690,8 +730,7 @@ def _scan_monitorados(date, cadernos=None):
             if chave in vistos:
                 continue
             vistos.add(chave)
-            ini, fim = max(0, pos - 40), min(len(base), pos + 160)
-            trecho = _limpar_html(base[ini:fim])
+            trecho = _trecho_da_mencao(base, pos)
             itens.append({"categoria": "NOMES_MONITORADOS", "pessoa": nome,
                           "cargo": m.get("funcao", ""),
                           "tipo_ato": "Mencao no D.O.", "caderno": caderno,

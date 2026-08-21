@@ -152,8 +152,12 @@ SUBSEC_BOLETIM = None
 # Faixas de urgência do rótulo da seção 1, contadas da edição até o prazo.
 # É rótulo de leitura, não de negócio: serve para o olho achar primeiro o que
 # vence esta semana. O que manda é a DATA, que vem logo ao lado.
-CURTO_PRAZO_DIAS = 3
-MEDIO_PRAZO_DIAS = 15
+#
+# Recalibradas em 21/08/2026: com 3 e 15 dias, os 12 prazos daquela edição saíram
+# TODOS como "Longo prazo" — inclusive os PCAN, cujo prazo de 30 dias é o padrão
+# do ato, não um vencimento distante. Rótulo que não separa nada não ajuda o olho.
+CURTO_PRAZO_DIAS = 7
+MEDIO_PRAZO_DIAS = 30
 
 # Corte do resumo no corpo do boletim (o texto completo está no Excel e na 002A).
 MAX_RESUMO = 420
@@ -471,6 +475,196 @@ def _ordena_prazos(itens, date):
     return sorted(itens, key=chave)
 
 
+# ============================================================================
+#  Pautas do Conselho de Contribuintes — N sessões, uma linha
+# ============================================================================
+# O Conselho publica várias pautas na mesma edição (uma por sessão) e cada uma
+# virava um item com a MESMA redação: "Primeira Câmara: sessao de 08/09 as 14h
+# com 3 recurso(s) pautado(s) (n. ...)". Na edição de 21/08/2026 foram 8 itens na
+# seção 1 mais os MESMOS 8 no quadro do fim — 16 aparições e ~12% das palavras do
+# boletim para uma informação que o leitor resolve numa linha. A área pediu a
+# consolidação em 21/08/2026.
+#
+# A junção é de LEITURA, não de coleta: a 002A e o Excel continuam com uma linha
+# por sessão, que é onde se confere horário e número de recurso. Mesmo princípio
+# do recorte da seção 2 — o que o boletim não mostra continua gravado.
+_RX_CONSELHO = re.compile(r"conselho de contribuintes")
+_RX_QTD_RECURSOS = re.compile(r"(\d+)\s*recurso")
+
+
+def _e_pauta_conselho(item):
+    """True se o item é uma pauta de julgamento do Conselho de Contribuintes.
+
+    Olha tipo_ato e orgao, que o _scan_pautas preenche, e NÃO o resumo: um ato
+    qualquer que cite o Conselho de passagem não é uma pauta."""
+    return bool(_RX_CONSELHO.search(
+        _norm(f'{_campo(item, "tipo_ato")} {_campo(item, "orgao")}')))
+
+
+def _chave_data(prazo_br):
+    """'08/09/2026' -> (2026, 9, 8), para ordenar datas que estão em texto."""
+    try:
+        d, m, a = (int(x) for x in str(prazo_br).split("/"))
+        return (a, m, d)
+    except (ValueError, TypeError):
+        return (9999, 99, 99)
+
+
+def _consolida_conselho(prazos):
+    """As N pautas do Conselho viram UM item; devolve a lista de prazos refeita.
+
+    O item consolidado carrega o que o leitor precisa para decidir se vai atrás:
+    quantas sessões, de quando a quando, quantos recursos ao todo e em que
+    câmaras. Como ele é um item comum, entra na ordenação por urgência e aparece
+    UMA vez na seção 1 e UMA no quadro, no lugar de oito em cada."""
+    pautas = [it for it in prazos if _e_pauta_conselho(it)]
+    if len(pautas) < 2:
+        return list(prazos)                    # 0 ou 1 sessão: não há o que juntar
+
+    datas, recursos, camaras, paginas = set(), 0, {}, set()
+    for it in pautas:
+        prazo = _campo(it, "prazo")
+        if prazo:
+            datas.add(prazo)
+        # A quantidade está em numero_ano ("3 recurso(s)"); o resumo é a reserva.
+        qtd = _RX_QTD_RECURSOS.search(_campo(it, "numero_ano") or _campo(it, "resumo"))
+        recursos += int(qtd.group(1)) if qtd else 0
+        # O resumo abre com a câmara ("Primeira Câmara: sessao de ...").
+        resumo = _campo(it, "resumo")
+        camara = resumo.split(":")[0].strip() if ":" in resumo else "Conselho de Contribuintes"
+        camaras.setdefault(camara, set()).add(prazo)
+        if _campo(it, "pagina"):
+            paginas.add(_campo(it, "pagina"))
+
+    datas = sorted(datas, key=_chave_data)
+    periodo = (f"de {datas[0]} a {datas[-1]}" if len(datas) > 1
+               else (f"em {datas[0]}" if datas else "sem data identificada"))
+    por_camara = "; ".join(f"{c} em {', '.join(sorted(d, key=_chave_data))}"
+                           for c, d in sorted(camaras.items()))
+    paginas = sorted(paginas, key=lambda p: int(p) if p.isdigit() else 0)
+
+    consolidado = {
+        "categoria": "PRAZO_CRITICO",
+        "tipo_ato": "Pauta de Julgamento do Conselho de Contribuintes",
+        "orgao": "SEFAZ - Conselho de Contribuintes",
+        "numero_ano": f"{recursos} recurso(s)",
+        "pessoa": "", "cargo": "", "processo": "", "data_ato": "",
+        "prazo": datas[0] if datas else "",
+        "resumo": (f"{len(pautas)} sessões pautadas {periodo}, {recursos} recurso(s) "
+                   f"no total ({por_camara}). Horários e números dos recursos no "
+                   "Excel da edição."),
+        "caderno": _campo(pautas[0], "caderno"),
+        "pagina": f"{paginas[0]}-{paginas[-1]}" if len(paginas) > 1 else (
+            paginas[0] if paginas else ""),
+    }
+    return [it for it in prazos if not _e_pauta_conselho(it)] + [consolidado]
+
+
+# ============================================================================
+#  Séries homogêneas de prazos — N atos iguais, uma linha
+# ============================================================================
+# O D.O. publica os atos em leva. Na edição de 21/08/2026, 10 dos 12 prazos eram
+# a MESMA portaria repetida (SUPFINF 1771 a 1780, instauração de PCAN): mesma
+# regra, mesmo prazo, mudando só o contribuinte e o processo. Eram ~430 das 681
+# palavras da seção 1 dizendo dez vezes a mesma coisa.
+#
+# A junção é de LEITURA (a 002A e o Excel continuam com uma linha por ato) e
+# obedece ao que o texto PROVA, não ao que o código supõe: só entram no resumo
+# consolidado as frases que aparecem em TODOS os atos da série. O que varia de um
+# para outro fica de fora, com o aviso de onde encontrá-lo.
+_SERIE_MINIMA = 3          # abaixo disso, ler item a item é mais claro
+_RX_FRASE = re.compile(r"(?<=\.)\s+")
+_RX_NUMERO_ANO = re.compile(r"^(.*?)(\d+)\s*/\s*(\d{2,4})$")
+
+
+def _frases(texto):
+    """Resumo -> lista de frases (corte no ponto final seguido de espaço)."""
+    return [f.strip() for f in _RX_FRASE.split(_txt(texto)) if f.strip()]
+
+
+def _chave_serie(item):
+    """O que define 'atos iguais': mesmo tipo de ato, mesmo prazo, mesmo órgão."""
+    return (_norm(_campo(item, "tipo_ato")), _campo(item, "prazo"),
+            _norm(_campo(item, "orgao")))
+
+
+def _faixa_numeros(itens):
+    """['SUPFINF 1771/2026', ...] -> 'SUPFINF 1771 a 1780/2026' ('' se não der).
+
+    Só forma a faixa quando TODOS têm o mesmo prefixo e o mesmo ano — senão a
+    numeração seria uma invenção nossa."""
+    partes = [_RX_NUMERO_ANO.match(_campo(it, "numero_ano")) for it in itens]
+    if not all(partes):
+        return ""
+    prefixos = {p.group(1).strip() for p in partes}
+    anos = {p.group(3) for p in partes}
+    if len(prefixos) != 1 or len(anos) != 1:
+        return ""
+    numeros = sorted(int(p.group(2)) for p in partes)
+    prefixo = prefixos.pop()
+    return (f"{prefixo} {numeros[0]} a {numeros[-1]}/{anos.pop()}".strip()
+            if numeros[0] != numeros[-1] else "")
+
+
+def _prefixo_comum(textos):
+    """Maior começo de frase igual em todos os textos (em palavras inteiras).
+
+    Serve para o consolidado dizer DE QUE ATO se trata: nos PCAN, a primeira
+    frase difere no contribuinte, mas todas abrem com 'Instauração de PCAN'."""
+    listas = [t.split() for t in textos if t]
+    if not listas:
+        return ""
+    comum = []
+    for palavras in zip(*listas):
+        if len(set(palavras)) != 1:
+            break
+        comum.append(palavras[0])
+    return " ".join(comum).strip(" .,:;-")
+
+
+def _consolida_series(prazos):
+    """Junta cada série de atos iguais num item só. Devolve a lista refeita."""
+    grupos = {}
+    for it in prazos:
+        grupos.setdefault(_chave_serie(it), []).append(it)
+
+    saida = []
+    for (_tipo, prazo, _orgao), itens in grupos.items():
+        if len(itens) < _SERIE_MINIMA:
+            saida.extend(itens)
+            continue
+        resumos = [_campo(it, "resumo") for it in itens]
+        # Frases que aparecem em TODOS os atos — a regra que a série tem em comum.
+        frases_de = [_frases(r) for r in resumos]
+        comuns = [f for f in frases_de[0] if all(f in outras for outras in frases_de[1:])]
+        abertura = _prefixo_comum(resumos)
+        if not comuns and not abertura:
+            saida.extend(itens)                # nada em comum: não há o que juntar
+            continue
+        faixa = _faixa_numeros(itens)
+        titulo = " ".join(x for x in (_campo(itens[0], "tipo_ato"), faixa) if x)
+        paginas = sorted({_campo(it, "pagina") for it in itens if _campo(it, "pagina")},
+                         key=lambda p: int(p) if p.isdigit() else 0)
+        cabeca = f"{len(itens)} atos iguais" + (f" ({titulo})" if titulo else "")
+        corpo = " ".join(comuns) if comuns else ""
+        saida.append({
+            "categoria": "PRAZO_CRITICO",
+            "tipo_ato": _campo(itens[0], "tipo_ato"),
+            "numero_ano": faixa,
+            "orgao": _campo(itens[0], "orgao"),
+            "pessoa": "", "cargo": "", "processo": "", "data_ato": "",
+            "prazo": prazo,
+            "resumo": " ".join(x for x in (
+                f"{cabeca} — {abertura}..." if abertura else f"{cabeca}:",
+                corpo,
+                "O que muda em cada ato está no Excel da edição.") if x),
+            "caderno": _campo(itens[0], "caderno"),
+            "pagina": (f"{paginas[0]}-{paginas[-1]}" if len(paginas) > 1
+                       else (paginas[0] if paginas else "")),
+        })
+    return saida
+
+
 def _redacao(item):
     """Redação de um item na seção 7, conforme a natureza dele.
 
@@ -546,7 +740,11 @@ def render(date, itens, n_monitorados=None, parcial=False, blocos_falha=0,
 
     cab = cabecalho_edicao(date, extra=True if extra else None)
     nomes = _por_categoria(itens, "NOMES_MONITORADOS")
-    prazos = _ordena_prazos(_por_categoria(itens, "PRAZO_CRITICO"), date)
+    # Duas juntadas antes de ordenar: as pautas do Conselho (que têm datas
+    # diferentes entre si) e as séries de atos iguais (mesmo tipo, prazo e órgão).
+    prazos = _ordena_prazos(
+        _consolida_series(
+            _consolida_conselho(_por_categoria(itens, "PRAZO_CRITICO"))), date)
     # Seção 2: guarda o total SEFAZ antes de recortar, para poder dizer quantos
     # atos ficaram fora. Sem esse número, uma seção 2 vazia não se distingue de
     # uma edição sem movimentação nenhuma nem de uma rodada que falhou.

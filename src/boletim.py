@@ -385,8 +385,12 @@ def _cauda(item):
 
 
 def _item_padrao(item):
-    """Redação usada nas seções 4, 5, 6 e 7: TÍTULO — resumo — processo (caderno, p.)."""
-    return (f'<b>{_e(_titulo(item))}</b> — {_e(_corta(_campo(item, "resumo")))}'
+    """Redação usada nas seções 4, 5, 6 e 7: TÍTULO — resumo — processo (caderno, p.).
+
+    O resumo passa pelo _enxuga_comissao: onde houver rol de membros, entra a
+    contagem. Quem não tem rol atravessa intacto, então vale para as quatro seções."""
+    return (f'<b>{_e(_titulo(item))}</b> — '
+            f'{_e(_corta(_enxuga_comissao(_campo(item, "resumo"))))}'
             f"{_e(_cauda(item))}")
 
 
@@ -573,7 +577,9 @@ def _consolida_conselho(prazos):
 # consolidado as frases que aparecem em TODOS os atos da série. O que varia de um
 # para outro fica de fora, com o aviso de onde encontrá-lo.
 _SERIE_MINIMA = 3          # abaixo disso, ler item a item é mais claro
-_RX_FRASE = re.compile(r"(?<=\.)\s+")
+# O corte exige maiúscula depois do ponto: sem isso, o ponto de "(Id. 4344242-0)"
+# — o número funcional dos membros de comissão — parte a frase no meio do rol.
+_RX_FRASE = re.compile(r"(?<=\.)\s+(?=[A-ZÀ-ÖØ-Þ])")
 _RX_NUMERO_ANO = re.compile(r"^(.*?)(\d+)\s*/\s*(\d{2,4})$")
 
 
@@ -665,6 +671,153 @@ def _consolida_series(prazos):
     return saida
 
 
+# ============================================================================
+#  Atos repetidos fora da seção 1 — N publicações de mesmo teor, uma linha
+# ============================================================================
+# Mesma ideia de _consolida_series, para as seções que não têm prazo. Na edição
+# de 24/08/2026, 13 dos 22 acórdãos da seção 5 eram a MESMA frase mudando só o
+# número do recurso ("Recurso de ofício nº X. ICMS. Recurso desprovido,
+# confirmada a decisão do julgador de Primeira Instância").
+#
+# A série é definida pela FORMA do texto: dois atos entram na mesma quando o
+# resumo fica idêntico depois de trocar todo número por '#'. É o teste mais
+# conservador possível — os 9 acórdãos com decisão própria (decadência, recurso
+# provido, mudança de vício) não casam com ninguém e saem inteiros.
+_RX_NUMEROS = re.compile(r"\d+[\d.,\-/]*")
+
+
+def _assinatura(texto):
+    """Forma do texto: sem acento/caixa (via _norm) e sem número."""
+    return " ".join(_RX_NUMEROS.sub("#", _norm(texto)).split())
+
+
+def _lista_numeros(itens):
+    """'20863, 20867, 21281' — os números dos atos da série.
+
+    Existe porque _faixa_numeros não forma faixa aqui: o acórdão vem sem o ano
+    no número ('20863', não '20863/2026'). Os números ficam listados porque é
+    por eles que se procura o ato no D.O."""
+    return ", ".join(_campo(it, "numero_ano") for it in itens
+                     if _campo(it, "numero_ano"))
+
+
+def _consolida_repetidos(itens):
+    """Junta cada série de atos de mesmo teor num item só. Lista refeita."""
+    grupos = {}
+    for it in itens:
+        chave = (_norm(_campo(it, "tipo_ato")), _assinatura(_campo(it, "resumo")))
+        grupos.setdefault(chave, []).append(it)
+
+    saida = []
+    for grupo in grupos.values():
+        if len(grupo) < _SERIE_MINIMA:
+            saida.extend(grupo)
+            continue
+        resumos = [_campo(it, "resumo") for it in grupo]
+        # Só entra no consolidado a frase que aparece em TODOS — o que varia de
+        # um ato para outro (o número do recurso) fica de fora, com o aviso.
+        frases_de = [_frases(r) for r in resumos]
+        comuns = [f for f in frases_de[0] if all(f in outras for outras in frases_de[1:])]
+        corpo = " ".join(comuns)
+        if not corpo:
+            # Sem frase inteira em comum sobra o começo igual, que termina no
+            # ponto em que os atos divergem — portanto no meio de uma oração
+            # ("...RIOPREVIDÊNCIA, valor R$"). Recua até a última vírgula: prometer
+            # um valor que não vem é pior do que cortar antes.
+            corpo = _prefixo_comum(resumos)
+            if corpo:
+                corte = max(corpo.rfind(","), corpo.rfind(";"))
+                corpo = (corpo[:corte] if corte > 0 else corpo).rstrip(" ,;:-") + "..."
+        if not corpo:
+            saida.extend(grupo)                # nada em comum: não há o que juntar
+            continue
+        paginas = sorted({_campo(it, "pagina") for it in grupo if _campo(it, "pagina")},
+                         key=lambda p: int(p) if p.isdigit() else 0)
+        datas = {_campo(it, "data_ato") for it in grupo}
+        faixa = _faixa_numeros(grupo)
+        base = dict(grupo[0])
+        base.update({
+            "numero_ano": faixa,
+            "processo": "",                    # cada ato tem o seu; nenhum vale pelo grupo
+            # A data só sobrevive se for a mesma em todos: um "DE 18/08" no título
+            # de uma série que vai de 04/08 a 18/08 seria informação falsa.
+            "data_ato": grupo[0].get("data_ato") if len(datas) == 1 else "",
+            "resumo": f"{corpo} ({len(grupo)} atos de mesmo teor: "
+                      f"{faixa or _lista_numeros(grupo)}. "
+                      "O que muda em cada um está no Excel da edição.)",
+            "pagina": (f"{paginas[0]}-{paginas[-1]}" if len(paginas) > 1
+                       else (paginas[0] if paginas else "")),
+        })
+        saida.append(base)
+    return saida
+
+
+# ============================================================================
+#  Composição de comissão — a notícia é o ato, não o rol de nomes
+# ============================================================================
+# As portarias da CTCE trazem a comissão inteira: nome completo e Id funcional de
+# cada membro. Na edição de 24/08/2026 isso era 346 das 640 palavras da seção 4 —
+# mais da metade da seção para dizer QUEM compõe, quando o que muda o dia de quem
+# lê é QUE houve instauração ou troca. Os nomes continuam no Excel e na 002A.
+#
+# A frase só é rol se ABRIR anunciando um. Reconhecê-lo pela simples MENÇÃO a um
+# servidor engolia texto que não era rol nenhum — a RESOLUÇÃO 904/2026 de 20/08
+# delega a uma servidora competência para movimentar conta bancária, e a ata da
+# 845ª Sessão traz três decisões do colegiado; citar alguém não é listar comissão,
+# e as duas viravam "Comissão de 1 membro".
+_RX_ABRE_ROL = re.compile(
+    r"^(comiss[ãa]o (?:integrada|composta) por|dispensad[oa]s|designad[oa]s"
+    r"|novos membros)", re.I)
+_RX_MEMBRO = re.compile(r"\(Id\.[^)]*\)|Corregedor(?:a)?-Auxiliar", re.I)
+
+
+def _conta_membros(frase):
+    """Quantos membros a frase nomeia: pelo Id funcional; sem Id, pelo cargo."""
+    ids = re.findall(r"\(Id\.[^)]*\)", frase)
+    return len(ids) or len(re.findall(r"Corregedor(?:a)?-Auxiliar", frase, re.I))
+
+
+def _e_rol(frase):
+    """A frase é um rol de membros? Tem de ABRIR como rol e nomear alguém."""
+    return bool(_RX_ABRE_ROL.match(_norm(frase))) and _conta_membros(frase) > 0
+
+
+def _rotulo_rol(frase, n):
+    """Como contar este rol, pelo verbo que o abre."""
+    baixa = _norm(frase)
+    if baixa.startswith("dispensad"):
+        return f"dispensados {n}"
+    if baixa.startswith(("designad", "novos membros")):
+        return f"designados {n}"
+    return f"comissão de {n} membro" + ("s" if n > 1 else "")
+
+
+def _enxuga_comissao(resumo):
+    """Troca o rol de membros pela contagem, no lugar onde o rol estava.
+
+    Resumo sem rol volta intacto, então vale para todas as seções. Frase que já
+    vem contada da IA ("Dispensados 3 Corregedores-Auxiliares") não nomeia
+    ninguém, não é contada de novo e atravessa como conteúdo."""
+    frases = _frases(resumo)
+    if not any(_e_rol(f) for f in frases):
+        return resumo
+    partes = [(("rol", _rotulo_rol(f, _conta_membros(f))) if _e_rol(f) else ("txt", f))
+              for f in frases]
+    saida, i = [], 0
+    while i < len(partes):
+        if partes[i][0] == "txt":
+            saida.append(partes[i][1])
+            i += 1
+            continue
+        rols = []                              # rols seguidos viram uma frase só
+        while i < len(partes) and partes[i][0] == "rol":
+            rols.append(partes[i][1])
+            i += 1
+        frase = "; ".join(rols)
+        saida.append(frase[0].upper() + frase[1:] + " — nomes no Excel da edição.")
+    return " ".join(saida)
+
+
 def _redacao(item):
     """Redação de um item na seção 7, conforme a natureza dele.
 
@@ -713,10 +866,100 @@ def _tabela_prazos(itens, date):
 _RX_TAG = re.compile(r"<[^>]+>")
 
 
+# A IDENTIFICAÇÃO do ato continua no boletim, mas não conta como leitura: número
+# do processo, caderno/página, número do ato e data no título. Ninguém lê
+# "SEI-040006/010431/2026" a 200 palavras por minuto — passa o olho para conferir.
+# Contá-los penalizava justamente a edição densa em processo e página, que é a que
+# mais precisa de uma estimativa honesta.
+#
+# TUDO AQUI É SENSÍVEL À CAIXA, e não por descuido: o título traz "DE 20/08/2026"
+# em maiúscula, mas os resumos trazem "a partir de 17/08/2026" em minúscula, que é
+# texto lido. Um re.IGNORECASE aqui comeria a data de vigência dos atos.
+_RX_NAO_LIDO = re.compile(
+    r"SEI-\S+"                         # número do processo
+    r"|\(\s*Parte[^)]*\)"              # (Parte I, p.18)
+    r"|\bN[ºo°]\s*[\d./-]+"            # Nº 1.164/2026, só no título
+    r"|\bDE\s+\d{2}/\d{2}/\d{4}\b"     # DE 20/08/2026, só no título
+)
+
+
 def _minutos_leitura(corpo_html):
-    """Estimativa de leitura em minutos (mínimo 1), a partir do texto sem tags."""
-    palavras = len(_RX_TAG.sub(" ", corpo_html).split())
-    return max(1, round(palavras / PALAVRAS_POR_MINUTO))
+    """Estimativa de leitura em minutos (mínimo 1), a partir do texto sem tags.
+
+    Desconta a identificação do ato (ver _RX_NAO_LIDO): ela fica no boletim, mas
+    não é prosa que se leia."""
+    texto = _RX_NAO_LIDO.sub(" ", _RX_TAG.sub(" ", corpo_html))
+    return max(1, round(len(texto.split()) / PALAVRAS_POR_MINUTO))
+
+
+# ============================================================================
+#  Teto de leitura — o boletim cabe em TETO_MINUTOS, o resto vai para o Excel
+# ============================================================================
+# Pedido da área: o e-mail não pode passar de 10 minutos de leitura. Aparar texto
+# não resolve — medido nas edições de agosto/2026, o corpo varia de 7 a 16 min e a
+# seção que incha muda de dia para dia (a 5 em 24/08, a 7 em 18/08, a 2 em 20 e
+# 21/08, a 1 em 19/08). Só limite rígido garante o teto todo dia.
+#
+# NÃO se perde conteúdo: cada item cortado continua íntegro no Excel da edição e
+# na 002A. O boletim deixa de ser o arquivo e passa a ser a chamada dele.
+#
+# O corte é pela CAUDA da seção, e o aviso diz isso. Seria pior fingir um ranking
+# de relevância: os campos do item não sustentam um — filtrar a seção 5 por "não é
+# da SEFAZ", por exemplo, economiza 1,4 min e joga fora decretos de crédito
+# suplementar e portarias de orçamento, que são o que mais interessa à casa.
+TETO_MINUTOS = 10
+
+# Quantas palavras contadas o corpo pode ter. Espelha _minutos_leitura: o que não
+# conta como leitura (SEI, página, número e data do ato) também não ocupa o teto.
+_TETO_PALAVRAS = TETO_MINUTOS * PALAVRAS_POR_MINUTO
+
+# Nenhuma seção cedente desaparece por inteiro: um "0 itens" seria lido como
+# "não houve movimentação", que é diferente de "não coube".
+_MIN_ITENS_SECAO = 3
+
+
+def _custo(linha_html):
+    """Palavras que CONTAM (ver _RX_NAO_LIDO) numa linha já renderizada."""
+    return len(_RX_NAO_LIDO.sub(" ", _RX_TAG.sub(" ", linha_html)).split())
+
+
+def _aviso_transbordo(n):
+    """A linha que fecha uma seção que não coube inteira."""
+    return (f'<p class="contagem">Mais {n} ato(s) desta seção nesta edição. '
+            f"O texto completo de cada um está na planilha anexa e na base (002A); "
+            f"foram omitidos aqui para o boletim caber em {TETO_MINUTOS} minutos "
+            f"de leitura.</p>")
+
+
+def _corta_no_teto(cedentes, custo_fixo, custo_quadro=0):
+    """Reduz o que pode ceder até o corpo caber no teto.
+
+    `cedentes` é [(chave, itens, renderizador)] NA ORDEM EM QUE CEDEM espaço;
+    `custo_fixo` é o que nunca se corta (seções 1, 2, 3 e 6 e os cabeçalhos).
+    Devolve ({chave: (itens_mantidos, n_omitidos)}, manter_quadro).
+
+    O QUADRO DE PRAZOS CEDE PRIMEIRO, e inteiro: ele repete a seção 1 em forma de
+    tabela (ver _tabela_prazos), então é a única parte do boletim cuja saída não
+    tira nenhuma informação da mensagem — em 19/08/2026 eram 534 palavras dizendo
+    o que a seção 1 já dizia em 508. Nos dias que cabem, ele fica."""
+    custos = {ch: [_custo(render(it)) for it in itens] for ch, itens, render in cedentes}
+    total = custo_fixo + custo_quadro + sum(sum(v) for v in custos.values())
+    saida = {ch: (list(itens), 0) for ch, itens, _r in cedentes}
+    if total <= _TETO_PALAVRAS:
+        return saida, True
+    total -= custo_quadro                      # o duplicado sai antes de qualquer ato
+    if total <= _TETO_PALAVRAS:
+        return saida, False
+    for chave, itens, _render in cedentes:
+        mantidos, omitidos, custo = list(itens), 0, custos[chave]
+        while total > _TETO_PALAVRAS and len(mantidos) > _MIN_ITENS_SECAO:
+            mantidos.pop()                     # sai a última, a cauda da seção
+            total -= custo[len(mantidos)]
+            omitidos += 1
+        saida[chave] = (mantidos, omitidos)
+        if total <= _TETO_PALAVRAS:
+            break
+    return saida, False
 
 
 def render(date, itens, n_monitorados=None, parcial=False, blocos_falha=0,
@@ -753,8 +996,10 @@ def render(date, itens, n_monitorados=None, parcial=False, blocos_falha=0,
     pessoal = ([it for it in pessoal_sefaz if _e_da_subsecretaria(it, subsec)]
                if regra_subsec else pessoal_sefaz)
     fora_do_recorte = len(pessoal_sefaz) - len(pessoal)
-    controle = _por_categoria(itens, "DESTAQUE_CONTROLE_INTERNO")
-    executivas = _por_categoria(itens, "OBSERVACAO_EXECUTIVA")
+    # Seções 4 e 5 também vêm em leva (13 acórdãos de mesmo teor em 24/08/2026),
+    # então passam pela mesma juntada de séries da seção 1 — pela FORMA do texto.
+    controle = _consolida_repetidos(_por_categoria(itens, "DESTAQUE_CONTROLE_INTERNO"))
+    executivas = _consolida_repetidos(_por_categoria(itens, "OBSERVACAO_EXECUTIVA"))
     expediente = _por_categoria(itens, "EXPEDIENTE_PONTO_FACULTATIVO")
     # A seção 7 é "o que saiu nos demais cadernos": tanto os itens que o monitor
     # já classificou por caderno (6/7/8 do Excel) quanto qualquer outro item que
@@ -790,18 +1035,44 @@ def render(date, itens, n_monitorados=None, parcial=False, blocos_falha=0,
     if nomes:
         corpo.append(_lista([_item_nome(it) for it in nomes]))
 
+    # Teto de leitura: o que já foi montado (seções 1 a 3) é intocável; as seções
+    # 5, 7 e 4 cedem espaço nessa ordem, da cauda para o começo, até o corpo caber
+    # em TETO_MINUTOS. O que sai continua íntegro no Excel e na 002A.
+    quadro = _tabela_prazos(prazos, date)
+    # A reserva é o que ainda entra no corpo DEPOIS desta conta: os títulos das
+    # seções 4 a 7 e, se alguma ceder, o aviso de transbordo. Sem reservá-los o
+    # corpo passa do teto por algumas dezenas de palavras — em 21/08/2026 fechava
+    # em 2.115, dezesseis palavras acima do que ainda arredonda para 10 min.
+    reserva = (sum(_custo(f"<h2>{TITULOS[n]}</h2>") for n in (4, 5, 6, 7))
+               + 3 * _custo(_aviso_transbordo(99)))
+    fixo = sum(_custo(x) for x in corpo) + reserva
+    coube, manter_quadro = _corta_no_teto(
+        [("5", executivas, _item_padrao),
+         ("7", varredura, _redacao),
+         ("4", controle, _item_padrao)], fixo, _custo(quadro))
+    controle, omit4 = coube["4"]
+    executivas, omit5 = coube["5"]
+    varredura, omit7 = coube["7"]
+
     corpo.append(f"<h2>{_e(TITULOS[4])}</h2>")
     corpo.append(_lista([_item_padrao(it) for it in controle]) or _vazio(4))
+    if omit4:
+        corpo.append(_aviso_transbordo(omit4))
 
     corpo.append(f"<h2>{_e(TITULOS[5])}</h2>")
     corpo.append(_lista([_item_padrao(it) for it in executivas]) or _vazio(5))
+    if omit5:
+        corpo.append(_aviso_transbordo(omit5))
 
     corpo.append(f"<h2>{_e(TITULOS[6])}</h2>")
     corpo.append(_lista([_item_padrao(it) for it in expediente]) or _vazio(6))
 
     corpo.append(f"<h2>{_e(TITULOS[7])}</h2>")
     corpo.append(_secao_varredura(varredura, date, cab["secretario"]))
-    corpo.append(_tabela_prazos(prazos, date))
+    if omit7:
+        corpo.append(_aviso_transbordo(omit7))
+    if manter_quadro:
+        corpo.append(quadro)
     corpo_html = "\n".join(corpo)
 
     # Linha de identificação da edição, como no e-mail.

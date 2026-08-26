@@ -847,16 +847,31 @@ def _secao_varredura(itens, date, secretario):
     return _lista(linhas)
 
 
+# Quanto do resumo entra na Descrição do quadro. Era 300 até 26/08/2026, e a
+# 300 o quadro custava ~420 das ~1.970 palavras do corpo daquela edição — mais do
+# que a seção 1 inteira (423). Era isso que o fazia não caber, e ele saía justo
+# nas edições densas (24 e 26/08), que são as que mais pedem um fecho conferível.
+# A coluna FICA (a área pediu o quadro com descrição em 26/08/2026); o que muda é
+# o corte. A 120 caracteres a linha identifica o ato sem reler a seção 1, e o
+# quadro custa ~200 palavras. Para voltar ao texto longo, basta subir este número
+# — o teto se reequilibra sozinho, cortando mais cauda das seções 5, 7 e 4.
+MAX_RESUMO_QUADRO = 120
+
+
 def _tabela_prazos(itens, date):
-    """A tabela de prazos que fecha o boletim (a mesma da seção 1, em quadro)."""
+    """O quadro que fecha o boletim: a seção 1 em ordem de vencimento.
+
+    Sempre sai (ver _corta_no_teto); a Descrição vem cortada em
+    MAX_RESUMO_QUADRO, o texto íntegro está na seção 1, no Excel e na 002A."""
     if not itens:
         return ""
     linhas = []
     for it in _ordena_prazos(itens, date):
         prazo = _campo(it, "prazo") or _data_br(date)
-        orgao = _campo(it, "orgao") or "SEFAZ"
+        orgao = _campo(it, "orgao") or _campo(it, "tipo_ato") or "SEFAZ"
         local = _local(it).strip(" ()") or "-"
-        linhas.append(f"<tr><td>{_e(prazo)}</td><td>{_e(_corta(_campo(it, 'resumo'), 300))}</td>"
+        resumo = _corta(_campo(it, "resumo"), MAX_RESUMO_QUADRO)
+        linhas.append(f"<tr><td>{_e(prazo)}</td><td>{_e(resumo)}</td>"
                       f"<td>{_e(orgao)}</td><td>{_e(local)}</td></tr>")
     return ("<h2>PRAZOS EM QUADRO</h2><table>"
             "<tr><th>Prazo</th><th>Descrição</th><th>Órgão / Unidade</th>"
@@ -931,25 +946,24 @@ def _aviso_transbordo(n):
             f"de leitura.</p>")
 
 
-def _corta_no_teto(cedentes, custo_fixo, custo_quadro=0):
+def _corta_no_teto(cedentes, custo_fixo):
     """Reduz o que pode ceder até o corpo caber no teto.
 
     `cedentes` é [(chave, itens, renderizador)] NA ORDEM EM QUE CEDEM espaço;
-    `custo_fixo` é o que nunca se corta (seções 1, 2, 3 e 6 e os cabeçalhos).
-    Devolve ({chave: (itens_mantidos, n_omitidos)}, manter_quadro).
+    `custo_fixo` é o que nunca se corta (seções 1, 2, 3 e 6, o quadro de prazos e
+    os cabeçalhos). Devolve {chave: (itens_mantidos, n_omitidos)}.
 
-    O QUADRO DE PRAZOS CEDE PRIMEIRO, e inteiro: ele repete a seção 1 em forma de
-    tabela (ver _tabela_prazos), então é a única parte do boletim cuja saída não
-    tira nenhuma informação da mensagem — em 19/08/2026 eram 534 palavras dizendo
-    o que a seção 1 já dizia em 508. Nos dias que cabem, ele fica."""
+    O QUADRO DE PRAZOS NÃO CEDE. Até 26/08/2026 ele era a primeira coisa a sair,
+    por duplicar a seção 1 — e saía exatamente nas edições densas (24 e 26/08),
+    que são as que mais pedem um fecho conferível. A área pediu o quadro fixo em
+    26/08/2026. Parte do espaço veio da própria tabela: com a Descrição cortada
+    mais curta ela custa ~200 palavras em vez de ~420 (ver MAX_RESUMO_QUADRO); o
+    resto sai da cauda das seções 5, 7 e 4, como qualquer outro excesso."""
     custos = {ch: [_custo(render(it)) for it in itens] for ch, itens, render in cedentes}
-    total = custo_fixo + custo_quadro + sum(sum(v) for v in custos.values())
+    total = custo_fixo + sum(sum(v) for v in custos.values())
     saida = {ch: (list(itens), 0) for ch, itens, _r in cedentes}
     if total <= _TETO_PALAVRAS:
-        return saida, True
-    total -= custo_quadro                      # o duplicado sai antes de qualquer ato
-    if total <= _TETO_PALAVRAS:
-        return saida, False
+        return saida
     for chave, itens, _render in cedentes:
         mantidos, omitidos, custo = list(itens), 0, custos[chave]
         while total > _TETO_PALAVRAS and len(mantidos) > _MIN_ITENS_SECAO:
@@ -959,7 +973,7 @@ def _corta_no_teto(cedentes, custo_fixo, custo_quadro=0):
         saida[chave] = (mantidos, omitidos)
         if total <= _TETO_PALAVRAS:
             break
-    return saida, False
+    return saida
 
 
 def render(date, itens, n_monitorados=None, parcial=False, blocos_falha=0,
@@ -1045,11 +1059,11 @@ def render(date, itens, n_monitorados=None, parcial=False, blocos_falha=0,
     # em 2.115, dezesseis palavras acima do que ainda arredonda para 10 min.
     reserva = (sum(_custo(f"<h2>{TITULOS[n]}</h2>") for n in (4, 5, 6, 7))
                + 3 * _custo(_aviso_transbordo(99)))
-    fixo = sum(_custo(x) for x in corpo) + reserva
-    coube, manter_quadro = _corta_no_teto(
+    fixo = sum(_custo(x) for x in corpo) + reserva + _custo(quadro)
+    coube = _corta_no_teto(
         [("5", executivas, _item_padrao),
          ("7", varredura, _redacao),
-         ("4", controle, _item_padrao)], fixo, _custo(quadro))
+         ("4", controle, _item_padrao)], fixo)
     controle, omit4 = coube["4"]
     executivas, omit5 = coube["5"]
     varredura, omit7 = coube["7"]
@@ -1071,8 +1085,7 @@ def render(date, itens, n_monitorados=None, parcial=False, blocos_falha=0,
     corpo.append(_secao_varredura(varredura, date, cab["secretario"]))
     if omit7:
         corpo.append(_aviso_transbordo(omit7))
-    if manter_quadro:
-        corpo.append(quadro)
+    corpo.append(quadro)
     corpo_html = "\n".join(corpo)
 
     # Linha de identificação da edição, como no e-mail.

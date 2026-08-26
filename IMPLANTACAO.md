@@ -24,7 +24,7 @@ Tudo passa pelo proxy da SEFAZ, que faz inspeção TLS — o `instalar.bat` já 
 ### 1. Clonar o projeto
 
 ```cmd
-git clone https://gitlab.fazenda.rj.gov.br/sefaz/subtic/susist/arquitetura/ia-centro-de-excel-ncia/01_lab/01_engenharia_ia/0001ia_ioerj_rag_diario_inteligente.git DOERJ
+git clone https://gitlab.fazenda.rj.gov.br/sefaz/subtic/susist/arquitetura/ia-centro-de-excel-ncia/01_lab/01_engenharia_ia/0001ia-ioerj-rag-diario-inteligente.git DOERJ
 cd DOERJ
 ```
 

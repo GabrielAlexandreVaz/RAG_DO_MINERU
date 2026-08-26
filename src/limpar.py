@@ -81,7 +81,17 @@ def limpar_saida(dias, simular=False):
 
 
 def rotacionar_logs(simular=False):
-    """Renomeia para .1 os logs que passaram de LOG_MAX_BYTES. Devolve o nº rotacionado."""
+    """Renomeia para .1 os logs que passaram de LOG_MAX_BYTES. Devolve o nº rotacionado.
+
+    ARQUIVO EM USO NÃO É ERRO. O run_pipeline.bat redireciona a execução inteira
+    para logs/pipeline.log e mantém o arquivo aberto até o fim; o Windows não
+    renomeia arquivo aberto. Enquanto a rotação só existia aqui — dentro desse
+    redirecionamento — ela estourava WinError 32 em TODA execução a partir de
+    5 MB, derrubava o passo de limpeza e deixava o log crescer sem teto.
+
+    A rotação de verdade acontece no início do .bat (`limpar.py --so-logs`),
+    antes de o log ser aberto. Aqui ela fica como rede: quando o arquivo está
+    preso, avisa e segue — quem lê o log precisa saber por que ele não girou."""
     pasta = config.ROOT / "logs"
     if not pasta.exists():
         return 0
@@ -91,10 +101,20 @@ def rotacionar_logs(simular=False):
             continue
         print(f"[limpar] {'(simulacao) ' if simular else ''}rotacionando {log.name} "
               f"({log.stat().st_size / 1e6:.1f} MB)")
-        if not simular:
-            antigo = log.with_suffix(".log.1")
-            antigo.unlink(missing_ok=True)      # guarda só a geração anterior
-            log.rename(antigo)
+        if simular:
+            n += 1
+            continue
+        antigo = log.with_suffix(".log.1")
+        try:
+            # replace() e nao unlink()+rename(): substitui o .1 num passo so, e
+            # se o log estiver preso levanta ANTES de encostar no .1. Com o
+            # unlink em separado, uma rotacao que falhava apagava a geracao
+            # anterior e nao punha nada no lugar — o pior dos dois mundos.
+            log.replace(antigo)
+        except PermissionError:
+            print(f"[limpar] {log.name} esta aberto por outro processo -> rotacao "
+                  "adiada para o inicio da proxima execucao (run_pipeline.bat).")
+            continue
         n += 1
     return n
 
@@ -111,7 +131,19 @@ def main():
     ap.add_argument("--dias", type=int, default=None,
                     help=f"Dias de saida/ a preservar (padrao: {config.RETENCAO_DIAS}, do .env)")
     ap.add_argument("--simular", action="store_true", help="So mostra o que seria apagado")
+    ap.add_argument("--so-logs", action="store_true",
+                    help="So rotaciona os logs (nao mexe na saida). E como o "
+                         "run_pipeline.bat chama a rotacao ANTES de abrir o log.")
     args = ap.parse_args()
+
+    # O .bat chama com --so-logs antes de redirecionar a execucao para o
+    # pipeline.log: e o unico momento em que o arquivo NAO esta aberto e,
+    # portanto, o unico em que o Windows deixa renomea-lo.
+    if args.so_logs:
+        logs = rotacionar_logs(args.simular)
+        print(f"[done] {logs} log(s) "
+              f"{'seriam rotacionados' if args.simular else 'rotacionado(s)'}.")
+        return
 
     dias = config.RETENCAO_DIAS if args.dias is None else args.dias
     print(f"[limpar] retencao: {dias} dia(s) | saida: {config.SAIDA_DIR}")

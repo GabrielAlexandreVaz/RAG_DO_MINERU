@@ -112,13 +112,46 @@ def _data_br(date_iso):
         return str(date_iso or "")
 
 
-def assunto_boletim(date, extra=False):
-    """Assunto da mensagem. A EDIÇÃO EXTRA precisa se anunciar já no assunto:
-    nos dias em que ela sai, a área recebe DOIS e-mails, e a caixa de entrada
-    mostra só essa linha."""
+# Número da edição e tempo de leitura saem da linha de identificação do PRÓPRIO
+# boletim ("Edição Nº 153 | ... · leitura ~14 min"), e não de uma segunda consulta
+# ao índice. É de propósito: assim o assunto não pode divergir do que o
+# destinatário lê no cabeçalho da mensagem que abriu.
+_RX_SUB_EDICAO = re.compile(r"Edição\s+N[ºo°]\s*([\w-]+)")
+_RX_SUB_LEITURA = re.compile(r"leitura\s*~\s*(\d+)\s*min")
+
+
+def _dados_do_boletim(corpo_html):
+    """(numero_da_edicao, minutos) lidos do HTML. Ausente vira '' e some do assunto."""
+    numero = _RX_SUB_EDICAO.search(corpo_html or "")
+    minutos = _RX_SUB_LEITURA.search(corpo_html or "")
+    return (numero.group(1) if numero else "",
+            minutos.group(1) if minutos else "")
+
+
+def assunto_boletim(date, extra=False, corpo_html=None, retificacao=False):
+    """Assunto: prefixo, marca do tipo, data, número da edição e minutos de leitura.
+
+    A ordem é a da caixa de entrada — o que distingue uma mensagem da outra vem
+    antes do que se repete todo dia. EDIÇÃO EXTRA e RETIFICAÇÃO têm de se anunciar
+    já aqui: nos dias em que saem, a área recebe DOIS e-mails da MESMA data e a
+    caixa mostra só esta linha. Em 24/08/2026 isso custou caro — dois envios de
+    assunto idêntico, e quem abriu o primeiro leu a versão superada.
+
+    Sem `corpo_html`, edição e minutos simplesmente não entram: assunto mais curto
+    é melhor do que assunto com 'Ed. None'."""
     prefixo = config.email_settings()["assunto_prefixo"]
-    marca = " - EDICAO EXTRA" if extra else ""
-    return f"{prefixo}{marca} - {_data_br(date)}"
+    numero, minutos = _dados_do_boletim(corpo_html)
+    partes = [prefixo]
+    if retificacao:
+        partes.append("RETIFICACAO")
+    if extra:
+        partes.append("EDICAO EXTRA")
+    partes.append(_data_br(date))
+    if numero:
+        partes.append(f"Ed. {numero}")
+    if minutos:
+        partes.append(f"{minutos} min")
+    return " - ".join(partes)
 
 
 def validar_dominio(endereco, cfg):
@@ -343,7 +376,7 @@ def enviar_html(assunto, corpo_html, destinatarios=None, dry_run=False, arquivo=
 
 
 def enviar_boletim(date=None, extra=False, dry_run=False, force=False,
-                   destinatarios=None):
+                   destinatarios=None, retificacao=False):
     """Passo 7/7: envia o boletim da edição. NUNCA levanta — devolve True/False.
 
     True só quando TODOS os destinatários receberam: uma entrega parcial não pode
@@ -401,9 +434,13 @@ def enviar_boletim(date=None, extra=False, dry_run=False, force=False,
             return True
         alvos = pendentes
 
-    assunto = assunto_boletim(date, extra)
+    # Lido uma vez: o mesmo HTML alimenta o assunto (número da edição e minutos)
+    # e o corpo da mensagem.
+    corpo_html = arquivo.read_text(encoding="utf-8")
+    assunto = assunto_boletim(date, extra, corpo_html=corpo_html,
+                              retificacao=retificacao)
     try:
-        res = enviar_html(assunto, arquivo.read_text(encoding="utf-8"),
+        res = enviar_html(assunto, corpo_html,
                           destinatarios=alvos, dry_run=dry_run,
                           arquivo=_arquivo_conferencia(date, extra))
     except Exception as e:  # noqa: BLE001 - o pipeline não cai por causa do e-mail
@@ -460,13 +497,17 @@ def main():
                     help="Nao envia: so grava relatorios/email_<data>.json para conferencia")
     ap.add_argument("--force", action="store_true",
                     help="Reenvia mesmo se o marcador de envio ja existir")
+    ap.add_argument("--retificacao", action="store_true",
+                    help="Marca RETIFICACAO no assunto: este boletim CORRIGE um ja "
+                         "enviado da mesma edicao. Use junto com --force.")
     ap.add_argument("--para", default=None,
                     help="Destinatario(s) desta execucao, sobrepondo o .env (teste)")
     args = ap.parse_args()
 
     destinatarios = config._lista_emails(args.para) if args.para else None
     enviar_boletim(date=args.date, extra=args.extra, dry_run=args.dry_run,
-                   force=args.force, destinatarios=destinatarios)
+                   force=args.force, destinatarios=destinatarios,
+                   retificacao=args.retificacao)
     # Sai 0 SEMPRE: quem decide se a falha derruba algo é o run_pipeline, que
     # chama este passo sem _run() (como faz com o download e a limpeza).
 

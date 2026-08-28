@@ -9,12 +9,14 @@
 #  em producao. E uma imagem Debian (aquele Containerfile instala com apt-get),
 #  entao aqui tambem se usa apt-get - e nao dnf.
 #
-#  ATENCAO A TAG. Aquele projeto usa python:3.10; ESTE precisa de 3.11+.
-#  Nao e preferencia: numpy==2.4.6 e pandas==3.0.3, pinados no
-#  requirements.lock.txt, declaram requires-python >=3.11 e nao publicam wheel
-#  cp310. Em 3.10 o pip tentaria compilar numpy do zero e o build quebra. Se nao
-#  houver tag 3.11 no registry interno, e preciso pedir uma - a alternativa e
-#  repontar as 123 versoes do lock e perder o ambiente homologado.
+#  A TAG E 3.12-slim, e a escolha nao e livre: das quatro tags publicadas no
+#  svcocpsefaz/python, so essa serve. A janela util e Python >=3.11,<3.14, e ela
+#  vem de duas restricoes opostas:
+#    - piso  : numpy==2.4.6 e pandas==3.0.3 (pinados no lock) exigem >=3.11 e
+#              nao publicam wheel cp310  -> descarta 3.9-slim-buster e 3.10;
+#    - teto  : mineru==3.4.2 exige >=3.10,<3.14                -> descarta 3.14.2-bookworm.
+#  Sobra 3.12-slim. Por ser slim, a imagem vem sem compilador e sem as
+#  bibliotecas do Chromium - os dois `apt-get install` abaixo cuidam disso.
 #
 #  Build em dois estagios: o 'builder' precisa de compilador e das ferramentas
 #  de download; o estagio final so precisa das bibliotecas de execucao.
@@ -26,7 +28,7 @@
 #  (ConfigMap + Secret). Ver deploy/openshift/.
 # ==========================================================================
 
-ARG BASE_IMAGE=registry-quay-openshift-operators.apps.ocp.sefnet.rj/svcocpsefaz/python:3.11
+ARG BASE_IMAGE=registry-quay-openshift-operators.apps.ocp.sefnet.rj/svcocpsefaz/python:3.12-slim
 
 # --------------------------------------------------------------------------
 #  Estagio 1: builder
@@ -66,9 +68,10 @@ COPY requirements.lock.txt /build/
 RUN tr -d '\r' < requirements.lock.txt > /tmp/lock.txt \
     && printf '[lock] %s pacotes\n' "$(grep -c '==' /tmp/lock.txt)"
 
-# Falha cedo e com mensagem clara se a tag da imagem base for < 3.11, em vez de
-# deixar o pip tentar compilar numpy e morrer 200 linhas adiante.
-RUN python -c "import sys; sys.exit(0) if sys.version_info >= (3, 11) else sys.exit('ERRO: imagem base tem Python ' + sys.version.split()[0] + '; o lock exige 3.11+ (numpy 2.4.6 e pandas 3.0.3 nao tem wheel cp310). Use --build-arg BASE_IMAGE=<...>/python:3.11')" \
+# Falha cedo, e com mensagem clara, se a tag da imagem base cair fora da janela
+# util - em vez de deixar o pip morrer 200 linhas adiante. O teto e tao real
+# quanto o piso: mineru==3.4.2 nao suporta 3.14.
+RUN python -c "import sys; v=sys.version_info; sys.exit(0) if (3,11) <= v < (3,14) else sys.exit('ERRO: imagem base tem Python ' + sys.version.split()[0] + '. A janela util e >=3.11,<3.14 - piso do numpy/pandas do lock, teto do mineru. Use --build-arg BASE_IMAGE=<...>/python:3.12-slim')" \
     && python -c "import sys; print('[ok] Python', sys.version.split()[0])"
 
 # --- 1) torch CPU-only, ANTES de tudo -------------------------------------

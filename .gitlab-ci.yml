@@ -1,3 +1,43 @@
 include:
   - project: sefaz/subtic/suinfra/time-plataforma/gitlab-pipeline
     file: .pipeline-openshift-python.yaml
+
+# ===========================================================================
+#  Por que esta aplicacao sobrescreve a imagem de dois jobs
+#  --------------------------------------------------------------------------
+#  O template roda os jobs Python em `python:3.14.2-bookworm`. Esta aplicacao
+#  nao cabe nessa versao: o MinerU (que extrai o texto dos PDFs do Diario)
+#  declara `requires-python >=3.10,<3.14`, entao em 3.14 o pip nao encontra
+#  NENHUMA versao dele e o `build` morre em 20 segundos.
+#
+#  A janela util e >=3.11,<3.14, e vem de duas restricoes opostas:
+#    - piso: numpy e pandas exigem >=3.11 (nao publicam wheel cp310);
+#    - teto: mineru nao suporta 3.14.
+#  Das quatro tags publicadas em svcocpsefaz/python (3.9-slim-buster, 3.10,
+#  3.12-slim e 3.14.2-bookworm), so a 3.12-slim cai nessa janela. E a mesma
+#  imagem que o Containerfile usa como base.
+#
+#  A variavel PYTHON_IMAGE do template nao resolve aqui: os jobs trazem o
+#  `image:` fixo, entao a sobrescrita tem de ser por job. O proprio template
+#  preve isso ("Projetos podem sobrescrever no proprio .gitlab-ci.yml").
+#
+#  O `before_script` acrescenta git e wget porque a 3.12-slim vem sem eles e o
+#  `.install_dependencies` do template aborta se nao achar o git. O
+#  `!reference` preserva o before_script original em vez de substitui-lo.
+#
+#  Sobrescrevemos so `build` e `unit-test`: sao os dois jobs com
+#  `allow_failure: false` que instalam o requirements.txt. `lint` e
+#  `security-scan` toleram falha e nao travam a esteira.
+# ===========================================================================
+
+build:
+  image: registry-quay-openshift-operators.apps.ocp.sefnet.rj/svcocpsefaz/python:3.12-slim
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends git wget ca-certificates && rm -rf /var/lib/apt/lists/*
+    - !reference [.install_dependencies, before_script]
+
+unit-test:
+  image: registry-quay-openshift-operators.apps.ocp.sefnet.rj/svcocpsefaz/python:3.12-slim
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends git wget ca-certificates && rm -rf /var/lib/apt/lists/*
+    - !reference [.install_dependencies, before_script]

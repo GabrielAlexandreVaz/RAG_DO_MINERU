@@ -3,31 +3,40 @@ include:
     file: .pipeline-openshift-python.yaml
 
 # ===========================================================================
-#  Por que esta aplicacao sobrescreve a imagem de dois jobs
+#  Ajustes desta aplicacao sobre o template padrao
 #  --------------------------------------------------------------------------
-#  O template roda os jobs Python em `python:3.14.2-bookworm`. Esta aplicacao
-#  nao cabe nessa versao: o MinerU (que extrai o texto dos PDFs do Diario)
-#  declara `requires-python >=3.10,<3.14`, entao em 3.14 o pip nao encontra
-#  NENHUMA versao dele e o `build` morre em 20 segundos.
+#  Sao dois, e os dois tem a mesma raiz: este projeto nao e uma app web comum.
+#  Ele carrega PyTorch, MinerU e modelos de visao computacional - cerca de 3 GB
+#  de dependencias - para extrair o texto dos PDFs do Diario Oficial.
 #
-#  A janela util e >=3.11,<3.14, e vem de duas restricoes opostas:
-#    - piso: numpy e pandas exigem >=3.11 (nao publicam wheel cp310);
-#    - teto: mineru nao suporta 3.14.
-#  Das quatro tags publicadas em svcocpsefaz/python (3.9-slim-buster, 3.10,
-#  3.12-slim e 3.14.2-bookworm), so a 3.12-slim cai nessa janela. E a mesma
-#  imagem que o Containerfile usa como base.
+#  1) VERSAO DO PYTHON
+#     O template roda os jobs em `python:3.14.2-bookworm`. O MinerU declara
+#     `requires-python >=3.10,<3.14`, entao em 3.14 o pip nao encontra NENHUMA
+#     versao dele. A janela util e >=3.11,<3.14: o piso vem do numpy e do
+#     pandas (exigem 3.11+, nao publicam wheel cp310) e o teto, do MinerU.
+#     Das quatro tags de svcocpsefaz/python - 3.9-slim-buster, 3.10, 3.12-slim
+#     e 3.14.2-bookworm - so a 3.12-slim serve. E a mesma base do Containerfile.
 #
-#  A variavel PYTHON_IMAGE do template nao resolve aqui: os jobs trazem o
-#  `image:` fixo, entao a sobrescrita tem de ser por job. O proprio template
-#  preve isso ("Projetos podem sobrescrever no proprio .gitlab-ci.yml").
+#  2) O QUE OS JOBS INSTALAM
+#     O `build` do template roda `pip install -r requirements.txt` no runner e
+#     depois publica a pasta `venv/` como artifact. Para esta aplicacao isso
+#     nao funciona e nem faz sentido:
+#       - sao ~3 GB baixados num pod efemero, so para serem descartados;
+#       - o venv resultante estoura o limite de artifact;
+#       - e o pip do runner puxa o PyTorch com CUDA, que esta aplicacao nunca
+#         usa (ela roda em CPU por definicao - MINERU_DEVICE_MODE=cpu). O
+#         Containerfile instala a variante CPU, uma fracao do tamanho.
+#     Quem instala as dependencias de verdade e o Containerfile, com as
+#     versoes travadas do requirements.lock.txt, e a imagem e construida no
+#     OpenShift pelo job image-register. O `build` aqui fica com o que ele
+#     consegue garantir sem baixar nada: que todo o codigo-fonte compila.
 #
-#  O `before_script` acrescenta git e wget porque a 3.12-slim vem sem eles e o
-#  `.install_dependencies` do template aborta se nao achar o git. O
-#  `!reference` preserva o before_script original em vez de substitui-lo.
+#  Se o time de plataforma preferir tratar isso de outro jeito - uma variavel
+#  no template, um runner com mais disco - e so remover as sobrescritas abaixo.
 #
-#  Sobrescrevemos so `build` e `unit-test`: sao os dois jobs com
-#  `allow_failure: false` que instalam o requirements.txt. `lint` e
-#  `security-scan` toleram falha e nao travam a esteira.
+#  O `before_script` reinstala git e wget porque a imagem slim nao os traz e o
+#  `.install_dependencies` aborta se nao achar o git. O `!reference` preserva o
+#  before_script original em vez de substitui-lo.
 # ===========================================================================
 
 build:
@@ -35,9 +44,50 @@ build:
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends git wget ca-certificates && rm -rf /var/lib/apt/lists/*
     - !reference [.install_dependencies, before_script]
+  script:
+    - |
+      set -euo pipefail
+      echo "----------------------------"
+      echo "Validando o projeto (sem instalar a arvore de ~3 GB)"
+      echo "----------------------------"
+
+      python3 -m venv venv
+      . venv/bin/activate
+      pip install --upgrade pip setuptools wheel
+
+      # Compila todo o codigo-fonte. E o que este job consegue provar sem
+      # baixar dependencia nenhuma: que nao ha erro de sintaxe em lugar algum.
+      python -m compileall -q src deploy
+      echo "OK: todos os fontes compilam"
+
+      # O arquivo principal que o template procura (src/app.py).
+      python -m py_compile src/app.py
+      echo "OK: src/app.py validado"
+
+      echo "----------------------------"
+      echo "As dependencias sao instaladas no Containerfile, a partir do"
+      echo "requirements.lock.txt, durante o build da imagem no OpenShift."
+      echo "----------------------------"
+  artifacts:
+    paths:
+      - build.env
+    expire_in: 1 day
 
 unit-test:
   image: registry-quay-openshift-operators.apps.ocp.sefnet.rj/svcocpsefaz/python:3.12-slim
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends git wget ca-certificates && rm -rf /var/lib/apt/lists/*
     - !reference [.install_dependencies, before_script]
+  script:
+    - |
+      echo "Este projeto ainda nao tem suite de testes automatizados - nao ha"
+      echo "pasta tests/ nem pytest.ini, entao nao ha o que executar."
+      echo "A validacao de sintaxe do codigo roda no job build."
+      echo "O diagnostico funcional do projeto e o deploy/verificar.py, que"
+      echo "confere 14 itens (TLS, Oracle, modelos, Chromium, pastas) e roda"
+      echo "dentro do container ja construido - nao no runner."
+  artifacts:
+    when: always
+    paths:
+      - build.env
+    expire_in: 1 day

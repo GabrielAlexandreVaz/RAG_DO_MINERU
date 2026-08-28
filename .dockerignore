@@ -1,0 +1,49 @@
+# ==========================================================================
+#  .dockerignore · o que NAO entra no contexto de build da imagem
+#  --------------------------------------------------------------------------
+#  Sem este arquivo o build sobe ~1,5 GB de .venv, 77 MB de indice e 33 MB de
+#  saida do MinerU para o daemon - e, pior, o .env com as senhas do Oracle e as
+#  chaves de API. Nada disso pode ir para dentro de uma imagem que vai para o
+#  registry: o venv e reconstruido no build (para Linux), os dados vivem no PVC
+#  e os segredos entram por Secret do OpenShift.
+# ==========================================================================
+
+# --- Segredos: NUNCA -------------------------------------------------------
+.env
+
+# --- Ambiente e runtime que o build refaz ----------------------------------
+.venv/
+venv/
+modelos/
+navegadores/
+mineru.json
+
+# --- Dados gerados pelo pipeline (vivem no PVC) ----------------------------
+data/
+saida/
+downloads/
+relatorios/
+logs/
+screenshots/
+
+# --- Python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- Historico e apoio -----------------------------------------------------
+.git/
+.gitignore
+*.md
+
+# --- Windows: nao servem para nada dentro do container ---------------------
+*.bat
+
+# --- Avulsos de teste ------------------------------------------------------
+_pag3.png
+_payload.json
+teste.txt
+
+# --- Backups locais --------------------------------------------------------
+*.bak

@@ -165,11 +165,25 @@ Quatro coisas não dá para descobrir de fora, e cada uma pode travar o build:
    linhas adiante. Se não houver a tag, a alternativa é repontar as 123 versões
    do lock, o que joga fora o ambiente homologado.
 
-2. **Qual é a esteira e onde ela procura o arquivo?** GitLab CI, Tekton/OpenShift
-   Pipelines ou BuildConfig — cada uma tem um padrão. O `Containerfile` foi posto
-   na **raiz do repo**, com esse nome, que é o lugar que as três reconhecem por
-   convenção. Se a esteira da SEFAZ espera outro caminho ou `Dockerfile`, é só
-   renomear/mover.
+2. **O template da esteira procura `Containerfile` ou `Dockerfile`?** Já sabemos
+   que a esteira é **GitLab CI** e que o `.gitlab-ci.yml` do projeto (que vive na
+   branch `main`) não faz mais do que incluir o template central:
+
+   ```yaml
+   include:
+     - project: sefaz/subtic/suinfra/time-plataforma/gitlab-pipeline
+       file: .pipeline-openshift-python.yaml
+   ```
+
+   O `Containerfile` foi posto na **raiz do repo** com esse nome — o mesmo que a
+   app de FastAPI usa, então é a aposta certa. Falta só confirmar com o time de
+   plataforma, já que o template não é legível a partir deste projeto.
+
+   **Atenção ao fluxo de branch:** a esteira roda a partir da `main`, e o
+   desenvolvimento acontece na `first` (o histórico é uma sequência de
+   *Merge branch 'first' into 'main'*). Enquanto o `Containerfile` estiver só na
+   `first`, a esteira continua sem enxergá-lo — **é preciso abrir o merge
+   request**.
 
 3. **O build alcança o índice CPU do PyTorch e o ModelScope?** Bom sinal: o
    Containerfile da app de FastAPI baixa de `archive.ubuntu.com` e
@@ -248,11 +262,15 @@ está fixo em `127.0.0.1:5001`. Levá-lo ao cluster exige três coisas que o pip
 não precisa: bind em `0.0.0.0` com porta configurável, um servidor WSGI de
 verdade, e um `Service` + `Route`.
 
-**É aí — e só aí — que o nome começado com número volta a incomodar.** Nome de
+**É aí — e só aí — que o nome começado com número voltaria a incomodar.** Nome de
 `Service` é validado como *DNS-1035 label* (`[a-z]([-a-z0-9]*[a-z0-9])?`), que
 exige começar por **letra**; `Deployment`, `CronJob`, `ConfigMap`, `Secret`,
-`Route` e o `Application` do Argo usam *DNS-1123*, que aceita dígito inicial.
-Daí o `ia0001-` usado em todos os nomes aqui: preserva o código do catálogo e é a
-mesma convenção que o projeto já adota no Oracle
+`Route` e o `Application` do Argo usam *DNS-1123*, que aceita dígito inicial. Ou
+seja: o Argo nunca foi o problema — o `Service` é que seria.
+
+Na prática a questão está encerrada: **o projeto já foi renomeado no GitLab** de
+`0001ia-ioerj-rag-diario-inteligente` para `ia0001-ioerj-rag-diario-inteligente`.
+É a mesma convenção que o projeto já adotava no Oracle
 (`IA0001_IOERJ_RAG_DIARIO_INTELIGENTE_001A`), pelo mesmo motivo — nome começado
-por dígito dá trabalho.
+por dígito dá trabalho. Os manifestos aqui usam `ia0001-ioerj-rag-diario`, que
+combina com isso.

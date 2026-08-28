@@ -64,9 +64,9 @@ apontar para outro disco ou share.
 deploy\verificar.bat
 ```
 
-Confere 12 itens (Python, TLS, bibliotecas, Chromium, modelos, `.env`, escrita nas pastas, Oracle,
-índice) e devolve código 1 se algo essencial falhar. **Não agende nada enquanto não estiver tudo
-`[ok]`.**
+Confere 14 itens (Python, TLS, bibliotecas, Chromium, modelos, configuração, escrita nas
+pastas, Oracle, e-mail, índice) e devolve código 1 se algo essencial falhar. **Não agende
+nada enquanto não estiver tudo `[ok]`.**
 
 ### 5. Primeira execução manual
 

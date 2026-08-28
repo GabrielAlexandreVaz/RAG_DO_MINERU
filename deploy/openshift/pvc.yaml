@@ -1,0 +1,33 @@
+# ==========================================================================
+#  pvc.yaml · o disco do pipeline
+#  --------------------------------------------------------------------------
+#  O que vive aqui (e por que nao pode ser efemero):
+#    index/       o indice SQLite FTS5 - a memoria do projeto, acumulativa
+#    downloads/   os PDFs do D.O. (a trava de idempotencia do download olha aqui)
+#    saida/       o texto extraido pelo MinerU (~6 MB por edicao, retencao 30 dias)
+#    relatorios/  Excel, boletim HTML E os recibos email_enviado_<data>.txt
+#    screenshots/ prints de quando o download falha
+#
+#  Os recibos sao o caso mais critico: e o arquivo em relatorios\ que impede o
+#  boletim de ser reenviado nas outras rodadas do mesmo dia. Sem volume
+#  persistente, a area recebe o mesmo boletim de hora em hora.
+#
+#  ReadWriteOnce, NAO RWX: o indice e SQLite, que nao tolera multiplos
+#  escritores sobre NFS. Como o CronJob roda com concurrencyPolicy: Forbid,
+#  nunca ha mais de um pod escrevendo - RWO e suficiente e mais seguro.
+# ==========================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ia0001-ioerj-rag-diario-dados
+  labels:
+    app: ia0001-ioerj-rag-diario
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # ~2 GB/ano com a retencao de 30 dias que src/limpar.py aplica, mais folga
+      # para o indice historico. 20 Gi cobre com sobra.
+      storage: 20Gi
+  # storageClassName: <preencher com a StorageClass do cluster, se nao houver padrao>

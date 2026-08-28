@@ -42,12 +42,21 @@ def checar(nome, essencial=True):
 # --- 1. Interpretador ------------------------------------------------------
 @checar("Python do venv")
 def _python():
-    """Versão do interpretador e se estamos mesmo dentro do .venv do projeto."""
+    """Versão do interpretador e se estamos num ambiente isolado (não no global).
+
+    O que importa é NÃO ser o Python do sistema; ONDE fica o venv varia: na
+    estação é ROOT\\.venv (deploy\\instalar.bat), no container é /opt/venv, fora
+    do projeto de propósito (o código é copiado, o ambiente é assado na imagem).
+    Se existir um .venv na raiz, então é ele que tem de estar rodando — senão a
+    checagem passaria enquanto o job usa outro interpretador."""
     v = sys.version_info
     if v < (3, 10):
         raise RuntimeError(f"Python {v.major}.{v.minor} - o projeto pede 3.10+")
-    if not (ROOT / ".venv") .exists():
-        raise RuntimeError(".venv nao encontrado na raiz do projeto")
+    if sys.prefix == sys.base_prefix:
+        raise RuntimeError(f"rodando no Python global ({sys.prefix}) - use o venv do projeto")
+    local = ROOT / ".venv"
+    if local.exists() and Path(sys.prefix).resolve() != local.resolve():
+        raise RuntimeError(f"existe {local}, mas este processo roda em {sys.prefix}")
     return f"{v.major}.{v.minor}.{v.micro} em {sys.prefix}"
 
 
@@ -128,26 +137,34 @@ def _mineru():
 
 @checar("Executavel do MinerU")
 def _mineru_bin():
-    """O mineru.exe do venv (e não um global) é encontrável pelo extrair.py."""
+    """O binário do MinerU do venv (e não um global) é encontrável pelo extrair.py.
+
+    `_mineru_bin()` devolve o caminho quando acha o executável ao lado do
+    interpretador (mineru.exe no Windows, mineru no Linux) e cai no literal
+    "mineru" quando não acha — ou seja, o fallback É a falha."""
     import extrair
     b = extrair._mineru_bin()
-    if b == "mineru" and not Path(sys.prefix, "Scripts", "mineru.exe").exists():
-        raise RuntimeError("mineru.exe nao encontrado no venv")
+    if b == "mineru":
+        raise RuntimeError(f"nao encontrado em {Path(sys.executable).parent}")
     return b
 
 
 # --- 4. Configuração e pastas ---------------------------------------------
-@checar("Variaveis do .env")
+@checar("Variaveis de configuracao")
 def _env():
-    """O .env existe e tem as variáveis sem as quais o job não roda."""
+    """As variáveis sem as quais o job não roda estão preenchidas.
+
+    O que se cobra é o VALOR, não a origem: na estação ele vem do .env, no
+    container vem do ConfigMap/Secret e não existe arquivo nenhum (`load_dotenv`
+    sem .env é inócuo, e todo o config.py lê de os.getenv). Exigir o arquivo
+    reprovaria um pod perfeitamente configurado."""
     import config
-    if not (ROOT / ".env").exists():
-        raise RuntimeError(".env nao existe - copie o .env.example e preencha")
+    origem = ".env" if (ROOT / ".env").exists() else "ambiente"
     faltando = [n for n, v in [("ANTHROPIC_API_KEY", config.current_api_key()),
                                ("RAG_MODEL", config.MODEL)] if not v]
     if faltando:
-        raise RuntimeError("vazias: " + ", ".join(faltando))
-    return f"modelo={config.MODEL} | monitor={config.MONITOR_MODEL}"
+        raise RuntimeError(f"vazias (origem: {origem}): " + ", ".join(faltando))
+    return f"origem={origem} | modelo={config.MODEL} | monitor={config.MONITOR_MODEL}"
 
 
 @checar("Pastas de dados (existem e aceitam escrita)")

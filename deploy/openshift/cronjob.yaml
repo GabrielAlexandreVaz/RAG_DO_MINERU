@@ -1,0 +1,131 @@
+# ==========================================================================
+#  cronjob.yaml · o pipeline do DOERJ rodando no cluster
+#  --------------------------------------------------------------------------
+#  Substitui a Tarefa Agendada do Windows (deploy\instalar_tarefa.bat). E um
+#  CronJob, e nao um Deployment, porque o pipeline nao e um servidor: ele roda,
+#  le a edicao do dia e morre. Consequencia util - CronJob nao tem Service, e e
+#  o Service (validado como DNS-1035) o unico recurso que recusa nome comecado
+#  por digito.
+#
+#  POR QUE DE HORA EM HORA: o D.O. nao tem hora fixa - pode sair as 08:00 ou as
+#  10:00. Um job que roda so as 08:05 perde a edicao quando ela atrasa. Cada
+#  etapa tem trava de idempotencia, entao as rodadas seguintes do mesmo dia
+#  saem de graca: nao re-chamam a IA sobre uma edicao ja processada.
+# ==========================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ia0001-ioerj-rag-diario
+  labels:
+    app: ia0001-ioerj-rag-diario
+spec:
+  # Seg-Sex, de hora em hora, das 05:05 as 18:05 - o mesmo intervalo da tarefa
+  # que roda hoje na estacao.
+  schedule: "5 5-18 * * 1-5"
+
+  # O container roda em UTC; sem isto o job dispararia 3 horas fora.
+  # Requer Kubernetes 1.27+ (OpenShift 4.14+). Se o cluster for mais antigo,
+  # remova esta linha e converta o schedule para UTC: "5 8-21 * * 1-5".
+  timeZone: America/Sao_Paulo
+
+  # ------------------------------------------------------------------------
+  #  Forbid NAO E OPCIONAL.
+  #  A gravacao no Oracle e DELETE da edicao + INSERT. Duas execucoes em
+  #  paralelo apagam o resultado uma da outra - e por isso que o passo 7 do
+  #  IMPLANTACAO.md manda desabilitar a tarefa da maquina antiga antes de ligar
+  #  a nova. Aqui vale o mesmo: uma execucao por vez, sempre.
+  # ------------------------------------------------------------------------
+  concurrencyPolicy: Forbid
+
+  # Se o cluster ficar indisponivel, nao enfileira as rodadas perdidas: a
+  # proxima hora cheia ja pega a edicao (as travas cuidam do resto).
+  startingDeadlineSeconds: 300
+
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+  jobTemplate:
+    spec:
+      # Uma execucao normal leva de 30 a 55 minutos. 2h de teto e a mesma folga
+      # que a tarefa do Windows usa.
+      activeDeadlineSeconds: 7200
+      # Sem retentativa automatica: se falhou, a proxima rodada da hora seguinte
+      # tenta de novo do ponto onde parou (as travas de idempotencia garantem
+      # que o que ja foi feito nao e refeito).
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app: ia0001-ioerj-rag-diario
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: pipeline
+              # Ajuste para o registry do cluster. Com ImageStream:
+              #   image-registry.openshift-image-registry.svc:5000/<namespace>/ia0001-ioerj-rag-diario:latest
+              image: ia0001-ioerj-rag-diario:latest
+              imagePullPolicy: Always
+
+              # O CMD da imagem ja e este; explicito aqui para ficar obvio o que
+              # o job faz e para servir de molde as variantes (ver README.md).
+              command: ["python", "src/run_pipeline.py", "--download"]
+
+              envFrom:
+                - configMapRef:
+                    name: ia0001-ioerj-rag-diario-config
+                - secretRef:
+                    name: ia0001-ioerj-rag-diario-secret
+
+              resources:
+                requests:
+                  # O MinerU tem piso de ~2,8 GB - medido, nao estimado.
+                  memory: "4Gi"
+                  cpu: "1"
+                limits:
+                  # Estourar o limite vira OOMKilled, que neste pipeline e
+                  # traicoeiro: o bloco perdido some em silencio e a rodada
+                  # ainda pode terminar como "COMPLETO". Prefira folga aqui e,
+                  # se ainda assim morrer, baixe MINERU_SLICE no ConfigMap.
+                  memory: "8Gi"
+                  cpu: "2"
+
+              volumeMounts:
+                - name: dados
+                  mountPath: /dados
+                # /app precisa aceitar escrita: o codigo grava logs/ e arquivos
+                # temporarios ao lado do projeto. Um emptyDir resolve sem abrir
+                # a imagem inteira para escrita.
+                - name: tmp
+                  mountPath: /app/logs
+                # O Chromium do Playwright usa memoria compartilhada, e o
+                # /dev/shm padrao de um container tem so 64 MB - o suficiente
+                # para ele morrer no meio da navegacao com "Target closed" ou
+                # "Target crashed", que no log aparece como falha de download,
+                # nao como falta de memoria. O pipeline sobe o Chromium DUAS
+                # vezes (passo 1/7, download_diario, e passo 3/7, ler_cadernos),
+                # entao vale garantir espaco nas duas.
+                - name: dshm
+                  mountPath: /dev/shm
+
+              securityContext:
+                # O OpenShift ja atribui um UID aleatorio do grupo 0; o que
+                # declaramos aqui e so o que a SCC restricted-v2 exige ver.
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+                capabilities:
+                  drop: ["ALL"]
+                seccompProfile:
+                  type: RuntimeDefault
+
+          volumes:
+            - name: dados
+              persistentVolumeClaim:
+                claimName: ia0001-ioerj-rag-diario-dados
+            - name: tmp
+              emptyDir: {}
+            # medium: Memory = tmpfs. Atencao: o que for usado aqui conta contra
+            # o limits.memory do container acima, entao os 256 Mi saem dos 8 Gi.
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 256Mi

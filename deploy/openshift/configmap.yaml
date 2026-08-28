@@ -1,0 +1,84 @@
+# ==========================================================================
+#  configmap.yaml · a configuracao NAO secreta do pipeline
+#  --------------------------------------------------------------------------
+#  Equivale a metade publica do .env da estacao. As chaves, senhas e tokens vao
+#  no Secret (ver secret.example.yaml) - nada aqui pode ser sigiloso, porque
+#  ConfigMap e legivel por quem tem acesso de leitura ao namespace.
+#
+#  Lembrete que o proprio projeto ja documenta: a configuracao de NEGOCIO (o que
+#  o job procura, quais nomes monitora) vive nas tabelas do Oracle, nao aqui.
+#  Mudar palavras-chave ou monitorados nao exige tocar neste arquivo nem
+#  reimplantar nada.
+# ==========================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ia0001-ioerj-rag-diario-config
+  labels:
+    app: ia0001-ioerj-rag-diario
+data:
+  # --- IA -----------------------------------------------------------------
+  # ATENCAO: na Azure/Foundry estes campos sao o nome do DEPLOYMENT, nao do
+  # modelo. Os valores abaixo sao os que a estacao usa hoje; se o deployment do
+  # ambiente de producao do cluster tiver outro nome, e aqui que se troca.
+  RAG_MODEL: "claude-opus-4-8-do-producao"
+  # Extracao em massa (muitas paginas por edicao) -> modelo mais barato.
+  # Vazio = usa o RAG_MODEL.
+  MONITOR_MODEL: "claude-haiku-4-5_DOPRODDUCAO"
+
+  # --- Pastas de dados (todas apontam para o PVC) --------------------------
+  DOERJ_DOWNLOADS_DIR: "/dados/downloads"
+  DOERJ_SAIDA_DIR: "/dados/saida"
+  DOERJ_INDEX_DIR: "/dados/index"
+  DOERJ_RELATORIOS_DIR: "/dados/relatorios"
+  DOERJ_SCREENSHOT_DIR: "/dados/screenshots"
+  # Dias que a saida do MinerU fica em disco. O texto ja vive no indice; a saida
+  # so serve para reindexar sem reprocessar o PDF. 0 = nunca apaga.
+  DOERJ_RETENCAO_DIAS: "30"
+
+  # --- MinerU (extracao) ---------------------------------------------------
+  MINERU_DEVICE_MODE: "cpu"
+  MINERU_METHOD: "txt"
+  # Paginas por fatia. E a valvula de RAM: fatia grande pede mais memoria de uma
+  # vez e o worker morre com "Server disconnected without sending a response".
+  # A estacao roda com 5. Se aparecer OOMKilled no pod, baixe aqui ANTES de
+  # subir o limite de memoria.
+  MINERU_SLICE: "5"
+
+  # --- Download do D.O. ----------------------------------------------------
+  PORTAL_URL: "https://portal.ioerj.com.br/"
+  CADERNO_ALVO: "Poder Executivo"
+  DOWNLOAD_HEADLESS: "true"
+  # O container roda em UTC. Esta variavel decide a DATA da edicao que o job
+  # procura - sem ela, depois das 21h o job pediria o diario do dia seguinte.
+  DOWNLOAD_TZ: "America/Sao_Paulo"
+
+  # --- Oracle: schema e tabelas (os nomes nao sao segredo) ------------------
+  ORACLE_SCHEMA: "COE_IA"
+  ORACLE_TABLE: "IA0001_IOERJ_RAG_DIARIO_INTELIGENTE_001A"
+  ORACLE_TABLE_PALAVRAS: "IA0001_IOERJ_RAG_DIARIO_INTELIGENTE_001B"
+  ORACLE_TABLE_MONITOR: "IA0001_IOERJ_RAG_DIARIO_INTELIGENTE_002A"
+  ORACLE_TABLE_FILTRO: "IA0001_IOERJ_RAG_DIARIO_INTELIGENTE_002B"
+  ORACLE_TABLE_MONITORADOS: "IA0001_IOERJ_RAG_DIARIO_INTELIGENTE_002N"
+
+  # --- Boletim por e-mail --------------------------------------------------
+  # CHAVE-MESTRA. Com "false" o passo 7 MONTA as requisicoes e grava
+  # relatorios/email_<data>.json em vez de chamar a API - da para conferir
+  # destinatarios e assunto antes do primeiro envio de verdade a partir do
+  # cluster. Vire para "true" so depois de conferir.
+  EMAIL_ENVIO_ATIVO: "false"
+  # beta | prd. Manda em duas coisas: qual autorizador vale e se a trava de
+  # dominio esta ligada (fora de 'prd', so sai e-mail para dominio interno).
+  AUTORIZADOR_AMBIENTE: "beta"
+  EMAIL_API_TIMEOUT_S: "30"
+  EMAIL_SISTEMA: "RAG_DOERJ"
+  EMAIL_DOMINIOS_INTERNOS: "fazenda.rj.gov.br,redhat.com"
+  EMAIL_REMETENTE: "robodoerj@fazenda.rj.gov.br"
+  # A lista REAL de destinatarios esta no .env da estacao e nao e replicada aqui
+  # de proposito: sao nomes de pessoas, e este arquivo e versionado. Copie a
+  # linha EMAIL_DESTINATARIOS do .env na hora de aplicar, ou sobrescreva com
+  #   oc set data configmap/ia0001-ioerj-rag-diario-config --from-literal=EMAIL_DESTINATARIOS='...'
+  # Varios enderecos: separe por ; ou por , (o codigo manda um POST por endereco).
+  EMAIL_DESTINATARIOS: "svc_sei_auto@fazenda.rj.gov.br"
+  EMAIL_COPIA: ""
+  EMAIL_ASSUNTO_PREFIXO: "[DOERJ] Monitoramento SEFAZ"

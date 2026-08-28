@@ -4,6 +4,11 @@ Guia para subir o pipeline do DOERJ num servidor, sem depender da máquina de de
 Só o **pipeline em lote** vai para produção; o site Flask (`src/app.py`) continua sendo ferramenta
 local de consulta.
 
+> **Há um segundo caminho.** Para rodar em container no OpenShift — CronJob no lugar da Tarefa
+> Agendada — veja [deploy/openshift/README.md](deploy/openshift/README.md). Este guia continua
+> valendo: é o que está em produção hoje, e a migração só termina quando a tarefa daqui for
+> desligada (pelo motivo da seção [Voltar atrás](#voltar-atrás): as duas gravam nas mesmas tabelas).
+
 ## O que o servidor precisa ter
 
 | Requisito | Por quê |
@@ -142,3 +147,21 @@ como subprocesso e não importa o nosso `config.py`.
 
 Sem ele, o sintoma é confuso: o MinerU não baixa modelo e a chamada da IA falha em certificado, sem
 mensagem óbvia. Se recriar o venv na mão, rode o `instalar.bat` de novo ou recrie o arquivo.
+
+## O mesmo pipeline em container (OpenShift)
+
+O guia completo está em [deploy/openshift/README.md](deploy/openshift/README.md). O resumo das
+diferenças, para quem conhece a implantação acima:
+
+| Aqui (Windows) | No OpenShift |
+|---|---|
+| `deploy\instalar.bat` monta o `.venv`, o Chromium e os modelos | [`Containerfile`](Containerfile) faz o mesmo, no build, e assa tudo na imagem |
+| `.env` na raiz | ConfigMap + Secret (o código lê de `os.getenv` dos dois jeitos, sem mudança) |
+| `deploy\instalar_tarefa.bat` (`schtasks`) | `CronJob` com `concurrencyPolicy: Forbid` |
+| Pastas do projeto / share do OneDrive | um PVC `ReadWriteOnce` montado em `/dados` |
+| `logs\pipeline.log` com rotação a 5 MB | stdout, coletado por `oc logs` |
+| `deploy\verificar.bat` | o mesmo `verificar.py`, rodando dentro do pod |
+
+O `sitecustomize.py` do truststore continua sendo essencial, pelo motivo descrito na seção acima — o
+`Containerfile` o recria no build, e em Linux ele passa a ler o `/etc/ssl/certs` do sistema em vez
+do cofre de certificados do Windows.

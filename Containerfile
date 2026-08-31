@@ -34,7 +34,7 @@ ARG BASE_IMAGE=registry-quay-openshift-operators.apps.ocp.sefnet.rj/svcocpsefaz/
 #  Estagio 1: builder
 # --------------------------------------------------------------------------
 FROM ${BASE_IMAGE} AS builder
-ENV APP_VERSION="0.0.2"
+ENV APP_VERSION="0.0.3"
 
 # Onde tudo fica. Sao os MESMOS caminhos do estagio final, de proposito: o
 # mineru.json gravado aqui guarda o caminho ABSOLUTO dos modelos, entao mudar a
